@@ -17,14 +17,19 @@ from pathlib import Path
 from PySide6.QtCore import QProcess, Qt
 from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGridLayout,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
-    QPlainTextEdit, QProgressBar, QPushButton, QSpinBox, QSplitter,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog,
+    QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
+    QLineEdit, QListWidget, QMainWindow, QPlainTextEdit, QProgressBar,
+    QPushButton, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
     QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from ..environment import OmnetppEnv
-from ..inifile import parse_configs
+from ..inifgen import (
+    FEATURES, SCHEDULING_CHOICES, TRISTATE, ConfigSpec, TrafficClass,
+    compatibility_warnings, generate_config_text, write_generated_ini,
+)
+from ..inifile import parse_configs, runnable_configs
 from ..mcp_client import MCPClient, MCPError, result_text
 from ..runner import RunSpec, SimulationRunner, list_result_files
 from ..topology import Topology, find_topology
@@ -44,11 +49,14 @@ class MainWindow(QMainWindow):
         self.proc: QProcess | None = None
         self.ini_path: Path | None = None
         self.topo: Topology | None = None
+        self._loading = True  # suppress config-preview refresh during construction
 
-        self.setWindowTitle("TSN Tool — Step 2 (topology + run monitor)")
-        self.resize(1180, 800)
+        self.setWindowTitle("TSN Tool — Step 2 (topology + config builder + run monitor)")
+        self.resize(1180, 820)
         self._build_ui()
         self.set_ini(ini_path or env.default_showcase_ini)
+        self._loading = False
+        self._refresh_config()
 
     # --- UI construction ---------------------------------------------------
     def _build_ui(self) -> None:
@@ -72,6 +80,7 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_run_tab(), "Run && Monitor")
+        self.tabs.addTab(self._build_config_tab(), "Configure (ZeroConfigTSN)")
         self.tabs.addTab(self._build_topology_tab(), "Topology")
         root.addWidget(self.tabs, 1)
 
@@ -175,6 +184,176 @@ class MainWindow(QMainWindow):
             self._stat_labels[key] = v
         return box
 
+    def _build_config_tab(self) -> QWidget:
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        intro = QLabel(
+            "Build a runnable TSN configuration by extending a working base and "
+            "overriding feature toggles + per-class shaping. The result is written "
+            "to a separate <i>tsntool_generated.ini</i> (the showcase is never modified)."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color:#555;")
+        outer.addWidget(intro)
+
+        split = QSplitter(Qt.Horizontal)
+
+        left = QWidget()
+        ll = QVBoxLayout(left)
+        form = QFormLayout()
+        self.base_combo = QComboBox()
+        self.base_combo.currentIndexChanged.connect(self._refresh_config)
+        form.addRow("Base config (extends):", self.base_combo)
+        self.cfgname_edit = QLineEdit("TsnTool_Custom")
+        self.cfgname_edit.textChanged.connect(self._refresh_config)
+        form.addRow("New config name:", self.cfgname_edit)
+        ll.addLayout(form)
+
+        feat_box = QGroupBox("TSN features (override on switches)")
+        fform = QFormLayout(feat_box)
+        self.feature_combos: dict[str, QComboBox] = {}
+        for key, label, _pat in FEATURES:
+            cb = QComboBox()
+            cb.addItems(TRISTATE)
+            cb.currentIndexChanged.connect(self._refresh_config)
+            self.feature_combos[key] = cb
+            fform.addRow(label + ":", cb)
+        ll.addWidget(feat_box)
+
+        cls_box = QGroupBox("Per-traffic-class shaping")
+        cls_l = QVBoxLayout(cls_box)
+        self.class_table = QTableWidget(0, 6)
+        self.class_table.setHorizontalHeaderLabels(
+            ["Name", "Index", "Scheduling", "CBS idleSlope", "TAS open µs", "TAS cycle µs"])
+        self.class_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.class_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.class_table.itemChanged.connect(self._refresh_config)
+        cls_l.addWidget(self.class_table)
+        row_btns = QHBoxLayout()
+        add_btn = QPushButton("Add class")
+        add_btn.clicked.connect(lambda: self._add_class_row())
+        del_btn = QPushButton("Remove selected")
+        del_btn.clicked.connect(self._remove_class_row)
+        row_btns.addWidget(add_btn)
+        row_btns.addWidget(del_btn)
+        row_btns.addStretch(1)
+        cls_l.addLayout(row_btns)
+        ll.addWidget(cls_box, 1)
+        split.addWidget(left)
+
+        right = QWidget()
+        rl = QVBoxLayout(right)
+        rl.addWidget(QLabel("Compatibility warnings:"))
+        self.warn_box = QTextEdit(readOnly=True)
+        self.warn_box.setMaximumHeight(150)
+        rl.addWidget(self.warn_box)
+        rl.addWidget(QLabel("Generated config preview:"))
+        self.preview = QPlainTextEdit(readOnly=True)
+        self.preview.setFont(QFont("Menlo", 11))
+        rl.addWidget(self.preview, 1)
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        self.gen_run_btn = QPushButton("Generate, save && run ▶")
+        self.gen_run_btn.clicked.connect(self.on_save_and_run)
+        btns.addWidget(self.gen_run_btn)
+        rl.addLayout(btns)
+        split.addWidget(right)
+        split.setSizes([560, 520])
+        outer.addWidget(split, 1)
+
+        self._seed_class_table()
+        return tab
+
+    # --- config-builder helpers -------------------------------------------
+    def _add_class_row(self, name="", index=0, sched="CBS", idle="40Mbps",
+                       open_us="100", cycle_us="1000") -> None:
+        prev = self._loading
+        self._loading = True
+        r = self.class_table.rowCount()
+        self.class_table.insertRow(r)
+        self.class_table.setItem(r, 0, QTableWidgetItem(name))
+        self.class_table.setItem(r, 1, QTableWidgetItem(str(index)))
+        combo = QComboBox()
+        combo.addItems(SCHEDULING_CHOICES)
+        combo.setCurrentText(sched)
+        combo.currentIndexChanged.connect(self._refresh_config)
+        self.class_table.setCellWidget(r, 2, combo)
+        self.class_table.setItem(r, 3, QTableWidgetItem(idle))
+        self.class_table.setItem(r, 4, QTableWidgetItem(str(open_us)))
+        self.class_table.setItem(r, 5, QTableWidgetItem(str(cycle_us)))
+        self._loading = prev
+        self._refresh_config()
+
+    def _remove_class_row(self) -> None:
+        rows = sorted({i.row() for i in self.class_table.selectedIndexes()}, reverse=True)
+        for r in rows:
+            self.class_table.removeRow(r)
+        self._refresh_config()
+
+    def _seed_class_table(self) -> None:
+        # AVB classes mirroring the in-vehicle ManualTsn CBS setup
+        self._add_class_row("CDT (control)", 6, "CBS", "10Mbps")
+        self._add_class_row("Class A (video/lidar)", 5, "CBS", "40Mbps")
+        self._add_class_row("Class B (infotainment)", 4, "CBS", "40Mbps")
+
+    def _collect_spec(self) -> ConfigSpec:
+        features = {k: cb.currentText() for k, cb in self.feature_combos.items()}
+        classes: list[TrafficClass] = []
+        for r in range(self.class_table.rowCount()):
+            def cell(c, default=""):
+                it = self.class_table.item(r, c)
+                return it.text().strip() if it and it.text().strip() else default
+            try:
+                index = int(cell(1, "0"))
+            except ValueError:
+                index = 0
+            try:
+                open_us = float(cell(4, "100"))
+            except ValueError:
+                open_us = 100.0
+            try:
+                cycle_us = float(cell(5, "1000"))
+            except ValueError:
+                cycle_us = 1000.0
+            combo = self.class_table.cellWidget(r, 2)
+            classes.append(TrafficClass(
+                name=cell(0, f"class{r}"), index=index,
+                scheduling=combo.currentText() if combo else "inherit",
+                idle_slope=cell(3, "40Mbps"), tas_open_us=open_us, tas_cycle_us=cycle_us,
+            ))
+        return ConfigSpec(
+            name=self.cfgname_edit.text().strip() or "TsnTool_Custom",
+            base=self.base_combo.currentText(),
+            features=features, classes=classes,
+        )
+
+    def _refresh_config(self) -> None:
+        if getattr(self, "_loading", True):
+            return
+        spec = self._collect_spec()
+        self.preview.setPlainText(generate_config_text(spec))
+        warns = compatibility_warnings(spec)
+        self.warn_box.setPlainText("\n".join("• " + w for w in warns)
+                                   if warns else "No issues detected.")
+
+    def on_save_and_run(self) -> None:
+        if not self.ini_path:
+            return
+        spec = self._collect_spec()
+        try:
+            out = write_generated_ini(spec, self.ini_path)
+        except Exception as exc:
+            self._append(f"error writing generated ini: {exc}\n")
+            return
+        self._append(f"# wrote generated config to {out}\n")
+        ui = "Qtenv" if self.ui_combo.currentIndex() == 1 else "Cmdenv"
+        mcp = f"localhost:{self.mcp_port.value()}" if self.mcp_check.isChecked() else None
+        run = RunSpec(ini_path=out, config=spec.name, ui=ui,
+                      sim_time_limit=self.time_edit.text().strip() or None,
+                      status_frequency="0.2s", mcp_address=mcp)
+        self.tabs.setCurrentIndex(0)  # Run & Monitor
+        self._start_run(run)
+
     def _build_topology_tab(self) -> QWidget:
         tab = QWidget()
         lay = QHBoxLayout(tab)
@@ -230,8 +409,22 @@ class MainWindow(QMainWindow):
             if c and c.runnable:
                 self.config_combo.setCurrentIndex(i)
                 break
+
+        # populate the config-builder base dropdown (prefer a rich TSN base)
+        prev_loading = self._loading
+        self._loading = True
+        self.base_combo.clear()
+        self.base_combo.addItems([c.name for c in runnable_configs(self.ini_path)])
+        for pref in ("ManualTsn", "AutomaticTsn"):
+            idx = self.base_combo.findText(pref)
+            if idx >= 0:
+                self.base_combo.setCurrentIndex(idx)
+                break
+        self._loading = prev_loading
+
         self.refresh_results()
         self._load_topology(network)
+        self._refresh_config()
         self.statusBar().showMessage(f"Loaded {self.ini_path.name}")
 
     def _load_topology(self, network: str | None) -> None:
@@ -283,8 +476,13 @@ class MainWindow(QMainWindow):
             self.set_ini(Path(path))
 
     def on_run(self) -> None:
-        spec = self._make_spec()
+        self._start_run(self._make_spec())
+
+    def _start_run(self, spec: RunSpec | None) -> None:
         if spec is None:
+            return
+        if self.proc and self.proc.state() != QProcess.NotRunning:
+            self._append("# a simulation is already running — stop it first\n")
             return
         self._reset_dashboard()
         self._append(f"$ {self.runner.preview(spec)}\n")

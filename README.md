@@ -10,10 +10,11 @@ Tools* — no Eclipse plugin installation required.
 a chosen TSN showcase configuration (headless or Qtenv), optionally expose the
 built-in **MCP server**, and show the produced result files.
 
-**Step 2** (in progress, branch `feature/enhanced`): a **topology view** (the
-network diagram drawn from the NED, color-coded by role, links styled by
-bitrate) and a **live run monitor** (progress, sim time, events, speed,
-memory). The *ZeroConfigTSN*-style configuration builder is next.
+**Step 2** (branch `feature/enhanced`): a **topology view** (the network diagram
+drawn from the NED, color-coded by role, links styled by bitrate), a **live run
+monitor** (progress, sim time, events, speed, memory), and a *ZeroConfigTSN*-style
+**configuration builder** (TSN feature toggles + per-traffic-class shaping +
+incompatibility warnings → generate a runnable config → run).
 
 > Base demo: INET's `showcases/tsn/combiningfeatures/invehicle` — a realistic
 > in-vehicle network (6 switches, ~19 end-stations, redundant links, 4 traffic
@@ -81,6 +82,14 @@ The GUI has two tabs:
   (parsed from Cmdenv's status output); the raw log streams below, and the
   **Result files** panel lists the generated `.sca`/`.vec`. **Query MCP state**
   connects to a running simulation's MCP server.
+- **Configure (ZeroConfigTSN)** — build a runnable config without hand-editing
+  ini. Pick a **base** to extend (e.g. `ManualTsn`), set **TSN feature toggles**
+  (egress shaping, ingress filtering/PSFP, frame preemption, gPTP, FRER,
+  cut-through — each *inherit/on/off*), and edit a **per-traffic-class table**
+  (index, scheduling FIFO/CBS/TAS, CBS idleSlope, TAS gate timings). A live panel
+  shows **compatibility warnings**; the generated config is previewed and, on
+  **Generate, save & run**, written to a separate `tsntool_generated.ini` (the
+  showcase is never modified) and executed.
 - **Topology** — the network diagram parsed from the NED `@display` positions,
   with the background image (e.g. the car) behind it. Switches/devices/clock are
   color-coded and links styled by bitrate. Click a node to see its role, port
@@ -106,10 +115,11 @@ The GUI has two tabs:
 | `tsntool/environment.py` | locate OMNeT++/INET; build the `setenv` + `INET_ROOT` shell prefix |
 | `tsntool/inifile.py` | parse `omnetpp.ini` for runnable `[Config …]` sections |
 | `tsntool/topology.py` | parse a NED network into nodes/links/positions for the diagram |
+| `tsntool/inifgen.py` | generate a runnable `[Config]` (extend a base + feature/shaper overrides) + compatibility checks |
 | `tsntool/runner.py` | launch sims via the `inet` wrapper (`-u Cmdenv -c …`), stream output |
 | `tsntool/mcp_client.py` | minimal MCP (Streamable HTTP) client for the built-in server |
 | `tsntool/cli.py` | `env` / `list` / `topology` / `run` / `mcp` / `gui` subcommands |
-| `tsntool/gui/app.py` | PySide6 window (Run & Monitor + Topology tabs) |
+| `tsntool/gui/app.py` | PySide6 window (Run & Monitor + Configure + Topology tabs) |
 | `tsntool/gui/topology_view.py` | QGraphicsView topology diagram + PNG renderer |
 
 Simulations are launched through INET's `bin/inet` wrapper (which assembles the
@@ -126,9 +136,11 @@ pytest -q
 ## Roadmap
 
 - **Step 1:** run a chosen TSN showcase config from the tool / IDE. ✅
-- **Step 2 (in progress, `feature/enhanced`):** topology view ✅ + live run
-  monitor ✅; next: *ZeroConfigTSN*-style config builder (feature toggles +
-  per-class table + incompatibility warnings) → generate `.ini` → run.
+- **Step 2 (`feature/enhanced`):** topology view ✅ + live run monitor ✅ +
+  *ZeroConfigTSN*-style config builder ✅ (feature toggles + per-class table +
+  incompatibility warnings → generate `.ini` → run).
+- **Step 3 (next):** results tables, per-hop Gantt, histograms, problem
+  detection & advice (using the `brokenComponent` fault scenarios).
 - **Step 3:** results tables, per-hop Gantt, histograms, problem detection &
   advice (uses the `brokenComponent` fault scenarios).
 - **Step 4:** AI analysis over the MCP server.
