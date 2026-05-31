@@ -90,6 +90,8 @@ The GUI has two tabs:
   shows **compatibility warnings**; the generated config is previewed and, on
   **Generate, save & run**, written to a separate `tsntool_generated.ini` (the
   showcase is never modified) and executed.
+
+  ![Config builder](docs/config-builder.png)
 - **Topology** — the network diagram parsed from the NED `@display` positions,
   with the background image (e.g. the car) behind it. Switches/devices/clock are
   color-coded and links styled by bitrate. Click a node to see its role, port
