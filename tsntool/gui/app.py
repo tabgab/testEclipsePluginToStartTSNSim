@@ -10,6 +10,7 @@ Tabs:
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -162,9 +163,14 @@ class MainWindow(QMainWindow):
     def _build_dashboard(self) -> QWidget:
         box = QGroupBox("Live monitor")
         grid = QGridLayout(box)
+        self.monitor_note = QLabel("")
+        self.monitor_note.setWordWrap(True)
+        self.monitor_note.setStyleSheet("color:#b8860b;")  # amber; shown only when relevant
+        self.monitor_note.setVisible(False)
+        grid.addWidget(self.monitor_note, 0, 0, 1, 4)
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
-        grid.addWidget(self.progress, 0, 0, 1, 4)
+        grid.addWidget(self.progress, 1, 0, 1, 4)
         self._stat_labels: dict[str, QLabel] = {}
         fields = [("simtime", "Sim time"), ("event", "Event #"),
                   ("evsec", "ev/sec"), ("simsec", "simsec/sec"),
@@ -180,7 +186,7 @@ class MainWindow(QMainWindow):
             cell.addWidget(v)
             w = QWidget()
             w.setLayout(cell)
-            grid.addWidget(w, 1 + r, c)
+            grid.addWidget(w, 2 + r, c)
             self._stat_labels[key] = v
         return box
 
@@ -485,6 +491,7 @@ class MainWindow(QMainWindow):
             self._append("# a simulation is already running — stop it first\n")
             return
         self._reset_dashboard()
+        self._mcp_mode = bool(spec.mcp_address)
         self._append(f"$ {self.runner.preview(spec)}\n")
         self.proc = QProcess(self)
         self.proc.setProcessChannelMode(QProcess.MergedChannels)
@@ -511,7 +518,12 @@ class MainWindow(QMainWindow):
             server = (info or {}).get("serverInfo", {})
             self._append(f"  connected: {server.get('name', '?')} {server.get('version', '')}\n")
             self._append("  -- get_simulation_state --\n")
-            self._append(result_text(client.get_simulation_state()) + "\n")
+            txt = result_text(client.get_simulation_state())
+            self._append(txt + "\n")
+            try:
+                self._update_dashboard_from_state(json.loads(txt))
+            except (ValueError, TypeError):
+                pass
         except MCPError as exc:
             self._append(f"  MCP error: {exc}\n"
                          "  (start a run with 'Enable MCP server' checked first)\n")
@@ -540,6 +552,15 @@ class MainWindow(QMainWindow):
         data = bytes(self.proc.readAllStandardOutput()).decode("utf-8", errors="replace")
         self._append(data)
         self._parse_status(data)
+        if getattr(self, "_mcp_mode", False) and (
+                "Waiting for MCP requests" in data or "MCP server listening" in data):
+            self.monitor_note.setText(
+                "⚠ MCP server mode: the network is set up and the simulation is WAITING for "
+                "MCP/AI commands — it does not advance on its own, so the counters below reflect "
+                "setup only (event 0, t=0; the message count is objects created during "
+                "initialization). Click ‘Query MCP state’ to inspect it; uncheck ‘Enable MCP "
+                "server’ for a normal timed run; or use Qtenv to run interactively with the AI chat.")
+            self.monitor_note.setVisible(True)
 
     def _on_proc_finished(self, code: int, _status) -> None:
         self._append(f"\n# finished, exit code {code}\n")
@@ -573,6 +594,20 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         for lbl in self._stat_labels.values():
             lbl.setText("—")
+        self.monitor_note.clear()
+        self.monitor_note.setVisible(False)
+
+    def _update_dashboard_from_state(self, st: dict) -> None:
+        """Update the live counters from an MCP get_simulation_state result."""
+        if st.get("eventNumber") is not None:
+            self._stat_labels["event"].setText(str(st["eventNumber"]))
+        if st.get("simTime") is not None:
+            self._stat_labels["simtime"].setText(f"{st['simTime']} s")
+        if st.get("state"):
+            self.monitor_note.setText(
+                f"MCP state: {st['state']} — queried live via MCP. In MCP mode the simulation "
+                "advances only on MCP run commands (full MCP-driven runs arrive with the AI step).")
+            self.monitor_note.setVisible(True)
 
     def refresh_results(self) -> None:
         self.results.clear()
