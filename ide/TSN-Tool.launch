@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!--
+  OMNeT++ IDE "External Tools" configuration for the TSN Tool.
+
+  Import / use:
+    Run > External Tools > External Tools Configurations… > Program
+    (or import this file). Select an omnetpp.ini in the Project Explorer,
+    then run this configuration: it opens the TSN Tool GUI on that ini.
+
+  NOTE: ATTR_LOCATION below is an absolute path to run_tsntool.sh. Adjust it
+  if you move the tool. ${resource_loc} expands to the file currently selected
+  in the IDE (the omnetpp.ini you clicked on).
+-->
+<launchConfiguration type="org.eclipse.ui.externaltools.ProgramLaunchConfigurationType">
+    <stringAttribute key="org.eclipse.ui.externaltools.ATTR_LOCATION"
+        value="/Users/gabortabi/DEV/omnetpp-6.4.0aipre2/tsn-tool/run_tsntool.sh"/>
+    <stringAttribute key="org.eclipse.ui.externaltools.ATTR_TOOL_ARGUMENTS"
+        value="gui ${resource_loc}"/>
+    <stringAttribute key="org.eclipse.ui.externaltools.ATTR_WORKING_DIRECTORY"
+        value="/Users/gabortabi/DEV/omnetpp-6.4.0aipre2/tsn-tool"/>
+    <booleanAttribute key="org.eclipse.debug.ui.ATTR_LAUNCH_IN_BACKGROUND" value="true"/>
+    <booleanAttribute key="org.eclipse.ui.externaltools.ATTR_SHOW_CONSOLE" value="true"/>
+</launchConfiguration>
