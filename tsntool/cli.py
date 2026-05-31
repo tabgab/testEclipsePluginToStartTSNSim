@@ -2,6 +2,7 @@
 
     tsntool env                         show detected OMNeT++/INET install
     tsntool list  [INI]                 list runnable configs in an omnetpp.ini
+    tsntool topology [INI] [--render P] show/render the network topology
     tsntool run   [INI] -c CONFIG ...   run a config headless (streams output)
     tsntool mcp   --address host:port   query a running simulation's MCP server
     tsntool gui   [INI]                 launch the PySide6 GUI
@@ -19,6 +20,7 @@ from .environment import EnvironmentError, OmnetppEnv, locate_environment
 from .inifile import parse_configs, runnable_configs
 from .mcp_client import MCPClient, MCPError, result_text
 from .runner import RunSpec, SimulationRunner, list_result_files
+from .topology import find_topology
 
 
 def _env_or_exit() -> OmnetppEnv:
@@ -83,6 +85,31 @@ def cmd_run(args) -> int:
     return rc
 
 
+def cmd_topology(args) -> int:
+    env = _env_or_exit()
+    ini = _resolve_ini(env, args.ini)
+    if not ini.is_file():
+        print(f"error: no such ini file: {ini}", file=sys.stderr)
+        return 2
+    network = next((c.network for c in parse_configs(ini) if c.network), None)
+    topo = find_topology(ini, env, network)
+    if topo is None:
+        print(f"no NED topology found next to {ini}", file=sys.stderr)
+        return 1
+    print(topo.summary())
+    for n in topo.nodes:
+        print(f"  {n.name:20} {n.role:8} deg={topo.degree(n.name)}  p=({n.x:.0f},{n.y:.0f})")
+    if args.render:
+        try:
+            from .gui.topology_view import render_topology_png
+            out = render_topology_png(topo, args.render)
+            print(f"\nrendered diagram: {out}")
+        except ImportError as exc:
+            print(f"render needs PySide6 (pip install 'PySide6'): {exc}", file=sys.stderr)
+            return 2
+    return 0
+
+
 def cmd_mcp(args) -> int:
     host, _, port = args.address.partition(":")
     client = MCPClient(host=host or "localhost", port=int(port or 8765))
@@ -136,6 +163,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--time-limit", help="override sim-time-limit, e.g. 1ms")
     sp.add_argument("--mcp", help="start MCP server at host:port (e.g. localhost:8765)")
     sp.set_defaults(func=cmd_run)
+
+    sp = sub.add_parser("topology", help="show/render the network topology of an ini")
+    sp.add_argument("ini", nargs="?", help="path to omnetpp.ini (default: in-vehicle showcase)")
+    sp.add_argument("--render", metavar="PNG", help="render the topology diagram to a PNG file")
+    sp.set_defaults(func=cmd_topology)
 
     sp = sub.add_parser("mcp", help="query a running simulation's MCP server")
     sp.add_argument("--address", default="localhost:8765", help="host:port (default localhost:8765)")

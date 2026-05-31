@@ -6,16 +6,20 @@ RTaW-Pegase *ZeroConfigTSN* workflow. It is a standalone Python + Qt
 application that you can launch from inside the OMNeT++ IDE via *External
 Tools* — no Eclipse plugin installation required.
 
-This is the **Step 1** milestone: locate the OMNeT++/INET install, list the
-runnable configurations in an `omnetpp.ini`, **run a chosen TSN showcase
-configuration** (headless or in Qtenv), optionally expose the built-in **MCP
-server**, and show the produced result files. The configuration builder,
-results graphs, problem detection and AI analysis arrive in later steps (see
-`../TSN_Tool_Development_Proposal.md`).
+**Step 1** (done): locate the OMNeT++/INET install, list runnable configs, run
+a chosen TSN showcase configuration (headless or Qtenv), optionally expose the
+built-in **MCP server**, and show the produced result files.
+
+**Step 2** (in progress, branch `feature/enhanced`): a **topology view** (the
+network diagram drawn from the NED, color-coded by role, links styled by
+bitrate) and a **live run monitor** (progress, sim time, events, speed,
+memory). The *ZeroConfigTSN*-style configuration builder is next.
 
 > Base demo: INET's `showcases/tsn/combiningfeatures/invehicle` — a realistic
 > in-vehicle network (6 switches, ~19 end-stations, redundant links, 4 traffic
 > classes, multicast video, and a built-in `brokenComponent` fault knob).
+
+![In-vehicle topology](docs/invehicle-topology.png)
 
 ## Requirements
 
@@ -41,6 +45,10 @@ tsntool env                       # show the detected OMNeT++/INET installation
 tsntool list                      # list configs in the in-vehicle showcase
 tsntool list path/to/omnetpp.ini  # ... or in any ini
 
+# show / render the network topology
+tsntool topology                            # text summary of nodes + links
+tsntool topology --render topology.png      # render the diagram to a PNG
+
 # run a config headless (streams the simulation log; writes results/)
 tsntool run -c StandardEthernet --time-limit 1ms
 tsntool run -c AutomaticTsn
@@ -64,11 +72,19 @@ tsntool gui                       # opens on the in-vehicle showcase
 tsntool gui path/to/omnetpp.ini
 ```
 
-Pick a configuration, choose **Cmdenv** (headless) or **Qtenv** (GUI), set an
-optional run number / sim-time-limit, optionally tick **Enable MCP server**,
-and press **Run**. The live simulation log streams into the window and the
-**Result files** panel lists the generated `.sca`/`.vec` files. **Query MCP
-state** connects to a running simulation's MCP server and prints its state.
+The GUI has two tabs:
+
+- **Run && Monitor** — pick a configuration, choose **Cmdenv** (headless) or
+  **Qtenv** (GUI), set an optional run number / sim-time-limit, optionally tick
+  **Enable MCP server**, and press **Run**. A **live monitor** shows a progress
+  bar plus sim time, event count, ev/sec, simsec/sec, message counts and memory
+  (parsed from Cmdenv's status output); the raw log streams below, and the
+  **Result files** panel lists the generated `.sca`/`.vec`. **Query MCP state**
+  connects to a running simulation's MCP server.
+- **Topology** — the network diagram parsed from the NED `@display` positions,
+  with the background image (e.g. the car) behind it. Switches/devices/clock are
+  color-coded and links styled by bitrate. Click a node to see its role, port
+  count and neighbours; scroll to zoom, drag to pan.
 
 ## Launch from the OMNeT++ IDE
 
@@ -89,10 +105,12 @@ state** connects to a running simulation's MCP server and prints its state.
 |---|---|
 | `tsntool/environment.py` | locate OMNeT++/INET; build the `setenv` + `INET_ROOT` shell prefix |
 | `tsntool/inifile.py` | parse `omnetpp.ini` for runnable `[Config …]` sections |
+| `tsntool/topology.py` | parse a NED network into nodes/links/positions for the diagram |
 | `tsntool/runner.py` | launch sims via the `inet` wrapper (`-u Cmdenv -c …`), stream output |
 | `tsntool/mcp_client.py` | minimal MCP (Streamable HTTP) client for the built-in server |
-| `tsntool/cli.py` | `env` / `list` / `run` / `mcp` / `gui` subcommands |
-| `tsntool/gui/app.py` | PySide6 window tying it together |
+| `tsntool/cli.py` | `env` / `list` / `topology` / `run` / `mcp` / `gui` subcommands |
+| `tsntool/gui/app.py` | PySide6 window (Run & Monitor + Topology tabs) |
+| `tsntool/gui/topology_view.py` | QGraphicsView topology diagram + PNG renderer |
 
 Simulations are launched through INET's `bin/inet` wrapper (which assembles the
 correct `-n`/`-l`/`-x` flags from `$INET_ROOT`), inside a bash invocation that
@@ -107,10 +125,10 @@ pytest -q
 
 ## Roadmap
 
-- **Step 1 (this):** run a chosen TSN showcase config from the tool / IDE. ✅
-- **Step 2:** *ZeroConfigTSN*-style config builder (feature toggles + per-class
-  table + incompatibility warnings) → generate `.ini` → run. *(branch
-  `feature/enhanced`)*
+- **Step 1:** run a chosen TSN showcase config from the tool / IDE. ✅
+- **Step 2 (in progress, `feature/enhanced`):** topology view ✅ + live run
+  monitor ✅; next: *ZeroConfigTSN*-style config builder (feature toggles +
+  per-class table + incompatibility warnings) → generate `.ini` → run.
 - **Step 3:** results tables, per-hop Gantt, histograms, problem detection &
   advice (uses the `brokenComponent` fault scenarios).
 - **Step 4:** AI analysis over the MCP server.

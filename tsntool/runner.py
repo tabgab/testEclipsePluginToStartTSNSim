@@ -25,6 +25,7 @@ class RunSpec:
     ui: str = "Cmdenv"               # Cmdenv (headless) or Qtenv (GUI)
     sim_time_limit: str | None = None
     mcp_address: str | None = None   # e.g. "localhost:8765"
+    status_frequency: str | None = None  # Cmdenv express-mode status print interval, e.g. "0.2s"
     extra_args: list[str] = field(default_factory=list)
 
     @property
@@ -44,6 +45,8 @@ class SimulationRunner:
             args += ["-r", str(spec.run)]
         if spec.sim_time_limit:
             args.append(f"--sim-time-limit={spec.sim_time_limit}")
+        if spec.status_frequency and spec.ui == "Cmdenv":
+            args.append(f"--cmdenv-status-frequency={spec.status_frequency}")
         if spec.mcp_address:
             args.append(f"--mcp-server-address={spec.mcp_address}")
         args += list(spec.extra_args)
