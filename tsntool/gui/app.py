@@ -57,9 +57,11 @@ class MainWindow(QMainWindow):
         self.topo: Topology | None = None
         self._analysis: AnalysisResult | None = None
         self._loading_lat = True
+        self._loading_results = True   # suppress auto-analyze during list population
+        self._last_run_config: str | None = None
         self._loading = True  # suppress config-preview refresh during construction
 
-        self.setWindowTitle("TSN Tool — Step 2 (topology + config builder + run monitor)")
+        self.setWindowTitle("TSN Tool — topology · configure · run · results")
         self.resize(1180, 820)
         self._build_ui()
         self.set_ini(ini_path or env.default_showcase_ini)
@@ -89,8 +91,10 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_run_tab(), "Run && Monitor")
         self.tabs.addTab(self._build_config_tab(), "Configure (ZeroConfigTSN)")
-        self.tabs.addTab(self._build_results_tab(), "Results")
+        self._results_tab = self._build_results_tab()
+        self.tabs.addTab(self._results_tab, "Results")
         self.tabs.addTab(self._build_topology_tab(), "Topology")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self.tabs, 1)
 
         self.statusBar().showMessage("Ready.")
@@ -375,6 +379,7 @@ class MainWindow(QMainWindow):
         top.addWidget(QLabel("Result file:"))
         self.result_combo = QComboBox()
         self.result_combo.setMinimumWidth(340)
+        self.result_combo.currentIndexChanged.connect(self._on_result_selected)
         top.addWidget(self.result_combo, 1)
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self._refresh_result_scas)
@@ -434,12 +439,29 @@ class MainWindow(QMainWindow):
             return 2000.0
         return 0.0
 
-    def _refresh_result_scas(self) -> None:
+    def _refresh_result_scas(self, prefer_config: str | None = None) -> None:
+        self._loading_results = True
         self.result_combo.clear()
-        if not self.ini_path:
-            return
-        for p in find_result_scas(self.ini_path):
-            self.result_combo.addItem(p.name, userData=str(p))
+        if self.ini_path:
+            for p in find_result_scas(self.ini_path):
+                self.result_combo.addItem(p.name, userData=str(p))
+        # prefer the most recent file of a given config (e.g. the one just run)
+        if prefer_config:
+            for i in range(self.result_combo.count()):
+                if self.result_combo.itemText(i).startswith(prefer_config + "-"):
+                    self.result_combo.setCurrentIndex(i)
+                    break
+        self._loading_results = False
+
+    def _on_result_selected(self) -> None:
+        if not self._loading_results and self.result_combo.currentData():
+            self.on_analyze()
+
+    def _on_tab_changed(self, index: int) -> None:
+        # analyze on first visit to the Results tab if a file is selected
+        if (self.tabs.widget(index) is self._results_tab
+                and self._analysis is None and self.result_combo.currentData()):
+            self.on_analyze()
 
     def on_analyze(self) -> None:
         if self.result_combo.count() == 0:
@@ -724,6 +746,7 @@ class MainWindow(QMainWindow):
             return
         self._reset_dashboard()
         self._mcp_mode = bool(spec.mcp_address)
+        self._last_run_config = spec.config
         self._append(f"$ {self.runner.preview(spec)}\n")
         self.proc = QProcess(self)
         self.proc.setProcessChannelMode(QProcess.MergedChannels)
@@ -802,7 +825,11 @@ class MainWindow(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.statusBar().showMessage(f"Finished (exit {code}).")
         self.refresh_results()
-        self._refresh_result_scas()
+        self._refresh_result_scas(prefer_config=self._last_run_config)
+        # auto-analyze the just-produced results (headless runs only), then show them
+        if code == 0 and not self._mcp_mode and self.result_combo.currentData():
+            self.on_analyze()
+            self.tabs.setCurrentWidget(self._results_tab)
 
     # --- helpers -----------------------------------------------------------
     def _parse_status(self, chunk: str) -> None:
