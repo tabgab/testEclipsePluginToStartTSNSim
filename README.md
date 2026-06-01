@@ -6,18 +6,13 @@ RTaW-Pegase *ZeroConfigTSN* workflow. It is a standalone Python + Qt
 application that you can launch from inside the OMNeT++ IDE via *External
 Tools* — no Eclipse plugin installation required.
 
-**Step 1** (done): locate the OMNeT++/INET install, list runnable configs, run
-a chosen TSN showcase configuration (headless or Qtenv), optionally expose the
-built-in **MCP server**, and show the produced result files.
-
-**Steps 2–4** (branch `feature/enhanced`): a **topology view** (network diagram
-from the NED), a **live run monitor**, a *ZeroConfigTSN*-style **configuration
-builder** (feature toggles + per-class shaping + incompatibility warnings →
-generate a runnable config → run), a **results analyzer** — per-stream
-end-to-end latency with **PASS/FAIL vs editable deadlines**, a max-latency chart
-and per-stream latency histograms, and a **problems & advice** panel — and an
-**AI Assistant** for natural-language Q&A grounded in the analyzed results
-(Anthropic Claude, or a local Ollama with no API key).
+It covers the whole loop on a single network: pick or **build** a TSN
+configuration (feature toggles + per-class shaping with live incompatibility
+warnings), **run** it (headless or in Qtenv) with a live monitor, **analyze** the
+results (per-stream latency with PASS/FAIL vs editable deadlines, charts, and a
+problems/advice panel), and ask an **AI assistant** about them (Anthropic Claude,
+OpenRouter, or a local Ollama with no API key). It also draws the network
+**topology** from the NED and can expose the simulator's built-in **MCP server**.
 
 > Base demo: INET's `showcases/tsn/combiningfeatures/invehicle` — a realistic
 > in-vehicle network (6 switches, ~19 end-stations, redundant links, 4 traffic
@@ -176,21 +171,22 @@ source .venv/bin/activate
 pytest -q
 ```
 
-## Roadmap
+## Status & roadmap
 
-- **Step 1:** run a chosen TSN showcase config from the tool / IDE. ✅
-- **Step 2 (`feature/enhanced`):** topology view ✅ + live run monitor ✅ +
-  *ZeroConfigTSN*-style config builder ✅ (feature toggles + per-class table +
-  incompatibility warnings → generate `.ini` → run).
-- **Step 3 (`feature/enhanced`):** results analyzer ✅ — per-stream latency
-  PASS/FAIL vs editable deadlines, max-latency chart + histograms, and a
-  problems/advice panel (validated with the `brokenComponent` fault scenarios).
-- **Step 4 (`feature/enhanced`):** AI Assistant ✅ — grounded natural-language
-  Q&A on the analyzed results (Anthropic Claude or local Ollama).
-  *Future:* full MCP-driven runs (drive a live sim via the MCP server).
-- **Step 3:** results tables, per-hop Gantt, histograms, problem detection &
-  advice (uses the `brokenComponent` fault scenarios).
-- **Step 4:** AI analysis over the MCP server.
+All four milestones from the original brief are implemented and on `main`:
+
+- **Run** a chosen TSN showcase config from the tool / IDE (Cmdenv or Qtenv, with
+  the MCP server). ✅
+- **Configure** — *ZeroConfigTSN*-style builder: feature toggles + per-class table
+  + incompatibility warnings → generate a runnable `.ini` → run. ✅
+- **Analyze** — per-stream latency PASS/FAIL vs editable deadlines, max-latency
+  chart + histograms, and a problems/advice panel (validated with the
+  `brokenComponent` fault scenarios). ✅
+- **AI Assistant** — grounded natural-language Q&A (Anthropic Claude, OpenRouter,
+  or a local Ollama). ✅
+
+*Future ideas:* full MCP-driven live runs (drive a running sim via the MCP
+server), a per-hop gate Gantt for TAS-gated configs, and a packaged installer.
 
 See `../TSN_Plugin_Feasibility_and_Plan.md` and
 `../TSN_Tool_Development_Proposal.md` for the full plan and cost estimate.
