@@ -110,12 +110,20 @@ The GUI has two tabs:
   current Results data (topology, per-stream latency + deadlines, detected
   problems) and answers with concrete TSN fixes — always framed as
   *simulation-observed*, never as provable bounds. Quick buttons: *Diagnose
-  current results*, *Explain this network*. Provider is auto-detected: **Anthropic
-  Claude** when `ANTHROPIC_API_KEY` is set (uses the `anthropic` SDK,
-  `claude-opus-4-8`, adaptive thinking, streaming, prompt caching), otherwise a
-  **local Ollama** server (no key, no cost). Replies stream on a background thread.
+  current results*, *Explain this network*. Replies stream on a background thread.
 
   ![AI Assistant](docs/ai-assistant.png)
+
+  **Provider/model/key are explicit** via the **Settings…** dialog: choose
+  *Auto-detect / Anthropic (Claude) / Ollama (local)*, set the model, paste an
+  Anthropic API key (stored in the **OS keychain**, falling back to a `0600`
+  config file), or point at an Ollama URL and list its installed models — with a
+  **Test connection** button. Settings persist in `~/.config/tsntool/`.
+  Resolution order: explicit provider → `ANTHROPIC_API_KEY`/key present → reachable
+  Ollama. The Anthropic path uses the official `anthropic` SDK (`claude-opus-4-8`,
+  adaptive thinking, streaming, prompt caching); Ollama needs no key or cost.
+
+  ![AI settings](docs/ai-settings.png)
 - **Topology** — the network diagram parsed from the NED `@display` positions,
   with the background image (e.g. the car) behind it. Switches/devices/clock are
   color-coded and links styled by bitrate. Click a node to see its role, port
@@ -145,7 +153,9 @@ The GUI has two tabs:
 | `tsntool/analyzer.py` | read `.sca` via a scave subprocess; per-stream latency, drops, pass/fail |
 | `tsntool/_scave_helper.py` | subprocess worker that reads results via `omnetpp.scave` → JSON |
 | `tsntool/problems.py` | deadline-miss + meaningful-drop detection with advice |
-| `tsntool/ai.py` | grounding-context builder + Anthropic/Ollama chat providers (streaming) |
+| `tsntool/ai.py` | grounding-context builder + Anthropic/Ollama chat providers (streaming) + provider resolution |
+| `tsntool/settings.py` | persisted settings (provider/model/URL) + API key in OS keychain (0600-file fallback) |
+| `tsntool/gui/settings_dialog.py` | AI settings dialog (provider/model/key/URL, test connection) |
 | `tsntool/runner.py` | launch sims via the `inet` wrapper (`-u Cmdenv -c …`), stream output |
 | `tsntool/mcp_client.py` | minimal MCP (Streamable HTTP) client for the built-in server |
 | `tsntool/cli.py` | `env` / `list` / `topology` / `run` / `mcp` / `gui` subcommands |

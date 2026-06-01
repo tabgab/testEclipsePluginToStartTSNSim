@@ -106,29 +106,70 @@ def build_context(topology: Topology | None = None,
 class ProviderInfo:
     name: str            # "anthropic" | "ollama"
     model: str
-    label: str           # human-readable, for the UI
+    label: str = ""      # human-readable, for the UI
+    api_key: str | None = None   # explicit key (Anthropic); None → SDK reads env
+    base_url: str | None = None  # explicit base URL (Ollama)
 
 
-def _ollama_reachable(timeout: float = 1.5) -> bool:
+def _ollama_reachable(base: str | None = None, timeout: float = 1.5) -> bool:
     try:
-        urllib.request.urlopen(f"{OLLAMA_BASE}/api/tags", timeout=timeout)
+        urllib.request.urlopen(f"{base or OLLAMA_BASE}/api/tags", timeout=timeout)
         return True
     except (urllib.error.URLError, OSError):
         return False
 
 
+def list_ollama_models(base: str | None = None, timeout: float = 3.0) -> list[str]:
+    """Return the model names available on an Ollama server (for the settings UI)."""
+    try:
+        with urllib.request.urlopen(f"{base or OLLAMA_BASE}/api/tags", timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        return [m["name"] for m in data.get("models", []) if "name" in m]
+    except (urllib.error.URLError, OSError, ValueError):
+        return []
+
+
 def detect_provider() -> ProviderInfo | None:
-    forced = os.environ.get("LLM_PROVIDER", "").lower().strip()
-    if forced == "anthropic" or (not forced and os.environ.get("ANTHROPIC_API_KEY")):
-        return ProviderInfo("anthropic",
-                            os.environ.get("ANTHROPIC_MODEL", DEFAULT_ANTHROPIC_MODEL),
-                            "Anthropic (Claude)")
-    if forced == "ollama" or _ollama_reachable():
-        return ProviderInfo("ollama",
-                            os.environ.get("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL),
-                            "Ollama (local)")
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return ProviderInfo("anthropic", DEFAULT_ANTHROPIC_MODEL, "Anthropic (Claude)")
+    """Env-only provider detection (no persisted settings)."""
+    return resolve_provider(None)
+
+
+def resolve_provider(settings=None) -> ProviderInfo | None:
+    """Resolve the active provider from explicit Settings, then env, then auto.
+
+    Precedence: an explicit ``settings.provider`` wins; otherwise auto-detect
+    (Anthropic if a key is available — from settings, keychain or env — else a
+    reachable Ollama). Model/URL come from settings if set, else env, else the
+    built-in defaults.
+    """
+    def s(attr):
+        return getattr(settings, attr, "") if settings else ""
+
+    stored_key = settings.get_api_key() if settings else ""
+    env_key = os.environ.get("ANTHROPIC_API_KEY")
+    env_provider = os.environ.get("LLM_PROVIDER", "").lower().strip()
+    provider = s("provider") or "auto"
+
+    def anthropic(label):
+        model = s("anthropic_model") or os.environ.get("ANTHROPIC_MODEL", DEFAULT_ANTHROPIC_MODEL)
+        return ProviderInfo("anthropic", model, label, api_key=(stored_key or None))
+
+    def ollama(label):
+        base = s("ollama_base_url") or OLLAMA_BASE
+        model = s("ollama_model") or os.environ.get("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
+        return ProviderInfo("ollama", model, label, base_url=base)
+
+    if provider == "anthropic":
+        return anthropic("Anthropic (Claude)")
+    if provider == "ollama":
+        return ollama("Ollama (local)")
+
+    # auto
+    if stored_key or env_key or env_provider == "anthropic":
+        return anthropic("Anthropic (Claude, auto)")
+    base = s("ollama_base_url") or OLLAMA_BASE
+    if env_provider == "ollama" or _ollama_reachable(base):
+        return ollama("Ollama (local, auto)")
     return None
 
 
@@ -137,23 +178,38 @@ class AIError(RuntimeError):
     pass
 
 
+def test_anthropic(model: str, api_key: str | None = None) -> tuple[bool, str]:
+    """Validate an Anthropic key + model without spending output tokens."""
+    try:
+        import anthropic
+    except ImportError:
+        return False, "anthropic SDK not installed (pip install 'anthropic')"
+    try:
+        client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+        client.models.retrieve(model)
+        return True, f"key valid; model '{model}' available"
+    except Exception as exc:
+        return False, str(getattr(exc, "message", exc))[:200]
+
+
 def stream_chat(provider: ProviderInfo, system: str,
                 history: list[dict], on_text: Callable[[str], None]) -> str:
     """Stream an assistant reply; calls on_text(chunk) and returns the full text."""
     if provider.name == "anthropic":
-        return _stream_anthropic(provider.model, system, history, on_text)
+        return _stream_anthropic(provider.model, system, history, on_text, provider.api_key)
     if provider.name == "ollama":
-        return _stream_ollama(provider.model, system, history, on_text)
+        return _stream_ollama(provider.model, system, history, on_text, provider.base_url)
     raise AIError(f"unknown provider: {provider.name}")
 
 
-def _stream_anthropic(model, system, history, on_text) -> str:
+def _stream_anthropic(model, system, history, on_text, api_key=None) -> str:
     try:
         import anthropic
     except ImportError as exc:  # pragma: no cover
         raise AIError(f"anthropic SDK not installed: {exc}")
     try:
-        client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY
+        # explicit key when configured; otherwise the SDK reads ANTHROPIC_API_KEY
+        client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
     except Exception as exc:  # pragma: no cover
         raise AIError(str(exc))
     collected: list[str] = []
@@ -175,10 +231,11 @@ def _stream_anthropic(model, system, history, on_text) -> str:
     return "".join(collected)
 
 
-def _stream_ollama(model, system, history, on_text) -> str:
+def _stream_ollama(model, system, history, on_text, base_url=None) -> str:
+    base = base_url or OLLAMA_BASE
     messages = [{"role": "system", "content": system}] + history
     payload = json.dumps({"model": model, "messages": messages, "stream": True}).encode()
-    req = urllib.request.Request(f"{OLLAMA_BASE}/api/chat", data=payload,
+    req = urllib.request.Request(f"{base}/api/chat", data=payload,
                                  headers={"Content-Type": "application/json"}, method="POST")
     collected: list[str] = []
     try:
@@ -197,5 +254,5 @@ def _stream_ollama(model, system, history, on_text) -> str:
                 if obj.get("done"):
                     break
     except urllib.error.URLError as exc:
-        raise AIError(f"cannot reach Ollama at {OLLAMA_BASE}: {exc}")
+        raise AIError(f"cannot reach Ollama at {base}: {exc}")
     return "".join(collected)

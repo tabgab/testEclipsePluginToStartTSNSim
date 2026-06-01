@@ -39,7 +39,9 @@ from ..inifile import parse_configs, runnable_configs
 from ..mcp_client import MCPClient, MCPError, result_text
 from ..problems import detect_problems
 from ..runner import RunSpec, SimulationRunner, list_result_files
+from ..settings import Settings
 from ..topology import Topology, find_topology
+from .settings_dialog import SettingsDialog
 from .topology_view import ROLE_COLORS, TopologyView
 
 # status-line parsers (Cmdenv express mode)
@@ -80,6 +82,7 @@ class MainWindow(QMainWindow):
         self.ini_path: Path | None = None
         self.topo: Topology | None = None
         self._analysis: AnalysisResult | None = None
+        self._settings = Settings.load()
         self._ai_history: list[dict] = []
         self._ai_worker: AIChatWorker | None = None
         self._loading_lat = True
@@ -645,19 +648,18 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(tab)
 
         top = QHBoxLayout()
-        self._ai_provider = ai.detect_provider()
-        if self._ai_provider:
-            prov_text = f"LLM provider: {self._ai_provider.label} · model {self._ai_provider.model}"
-        else:
-            prov_text = ("No LLM provider detected — set ANTHROPIC_API_KEY for Claude, "
-                         "or run a local Ollama server.")
-        self.ai_provider_label = QLabel(prov_text)
+        self._ai_provider = ai.resolve_provider(self._settings)
+        self.ai_provider_label = QLabel("")
         self.ai_provider_label.setStyleSheet("color:#555;")
         top.addWidget(self.ai_provider_label, 1)
+        settings_btn = QPushButton("Settings…")
+        settings_btn.clicked.connect(self.on_ai_settings)
         redetect = QPushButton("Re-detect")
         redetect.clicked.connect(self._ai_redetect)
+        top.addWidget(settings_btn)
         top.addWidget(redetect)
         lay.addLayout(top)
+        self._update_ai_provider_label()
 
         hint = QLabel("Ask about the loaded network, configurations, or the analyzed "
                       "results. The assistant is grounded in the current Results tab data.")
@@ -695,21 +697,32 @@ class MainWindow(QMainWindow):
         quick.addWidget(clear)
         lay.addLayout(quick)
 
-        if not self._ai_provider:
-            self.ai_ask_btn.setEnabled(False)
+        self._update_ai_provider_label()
         return tab
 
     # --- AI helpers --------------------------------------------------------
-    def _ai_redetect(self) -> None:
-        self._ai_provider = ai.detect_provider()
-        if self._ai_provider:
-            self.ai_provider_label.setText(
-                f"LLM provider: {self._ai_provider.label} · model {self._ai_provider.model}")
-            self.ai_ask_btn.setEnabled(True)
+    def _update_ai_provider_label(self) -> None:
+        p = self._ai_provider
+        if p:
+            extra = f" · key: {self._settings.key_location()}" if p.name == "anthropic" else ""
+            self.ai_provider_label.setText(f"LLM provider: {p.label} · model {p.model}{extra}")
         else:
             self.ai_provider_label.setText(
-                "No LLM provider detected — set ANTHROPIC_API_KEY for Claude, or run Ollama.")
-            self.ai_ask_btn.setEnabled(False)
+                "No LLM provider configured — open Settings… to set an Anthropic key or an Ollama URL.")
+        if hasattr(self, "ai_ask_btn"):
+            self.ai_ask_btn.setEnabled(p is not None)
+
+    def _ai_redetect(self) -> None:
+        self._ai_provider = ai.resolve_provider(self._settings)
+        self._update_ai_provider_label()
+
+    def on_ai_settings(self) -> None:
+        dlg = SettingsDialog(self._settings, self)
+        if dlg.exec():
+            self._settings = dlg.settings
+            self._ai_provider = ai.resolve_provider(self._settings)
+            self._update_ai_provider_label()
+            self.statusBar().showMessage("AI settings saved.")
 
     def _ai_clear(self) -> None:
         self._ai_history = []
