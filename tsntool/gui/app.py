@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QProcess, Qt
-from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtGui import QColor, QFont, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog,
     QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
@@ -25,6 +25,10 @@ from PySide6.QtWidgets import (
     QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
+
+from ..analyzer import AnalysisResult, analyze, find_result_scas
 from ..environment import OmnetppEnv
 from ..inifgen import (
     FEATURES, SCHEDULING_CHOICES, TRISTATE, ConfigSpec, TrafficClass,
@@ -32,6 +36,7 @@ from ..inifgen import (
 )
 from ..inifile import parse_configs, runnable_configs
 from ..mcp_client import MCPClient, MCPError, result_text
+from ..problems import detect_problems
 from ..runner import RunSpec, SimulationRunner, list_result_files
 from ..topology import Topology, find_topology
 from .topology_view import ROLE_COLORS, TopologyView
@@ -50,6 +55,8 @@ class MainWindow(QMainWindow):
         self.proc: QProcess | None = None
         self.ini_path: Path | None = None
         self.topo: Topology | None = None
+        self._analysis: AnalysisResult | None = None
+        self._loading_lat = True
         self._loading = True  # suppress config-preview refresh during construction
 
         self.setWindowTitle("TSN Tool — Step 2 (topology + config builder + run monitor)")
@@ -82,6 +89,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_run_tab(), "Run && Monitor")
         self.tabs.addTab(self._build_config_tab(), "Configure (ZeroConfigTSN)")
+        self.tabs.addTab(self._build_results_tab(), "Results")
         self.tabs.addTab(self._build_topology_tab(), "Topology")
         root.addWidget(self.tabs, 1)
 
@@ -360,6 +368,229 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentIndex(0)  # Run & Monitor
         self._start_run(run)
 
+    def _build_results_tab(self) -> QWidget:
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        top = QHBoxLayout()
+        top.addWidget(QLabel("Result file:"))
+        self.result_combo = QComboBox()
+        self.result_combo.setMinimumWidth(340)
+        top.addWidget(self.result_combo, 1)
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.clicked.connect(self._refresh_result_scas)
+        analyze_btn = QPushButton("Analyze ▶")
+        analyze_btn.clicked.connect(self.on_analyze)
+        top.addWidget(refresh_btn)
+        top.addWidget(analyze_btn)
+        outer.addLayout(top)
+        self.result_summary = QLabel("Run a simulation, then Analyze to see per-stream latency and problems.")
+        self.result_summary.setStyleSheet("color:#555;")
+        self.result_summary.setWordWrap(True)
+        outer.addWidget(self.result_summary)
+
+        split = QSplitter(Qt.Horizontal)
+        left = QWidget()
+        ll = QVBoxLayout(left)
+        ll.addWidget(QLabel("End-to-end latency per stream — edit a deadline (µs) to set PASS/FAIL:"))
+        self.lat_table = QTableWidget(0, 6)
+        self.lat_table.setHorizontalHeaderLabels(
+            ["Stream", "count", "mean µs", "max µs", "deadline µs", "status"])
+        self.lat_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.lat_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.lat_table.itemChanged.connect(self._on_deadline_edited)
+        self.lat_table.itemSelectionChanged.connect(self._on_stream_selected)
+        ll.addWidget(self.lat_table, 2)
+        ll.addWidget(QLabel("Problems & advice:"))
+        self.problems_box = QTextEdit(readOnly=True)
+        ll.addWidget(self.problems_box, 1)
+        split.addWidget(left)
+
+        right = QWidget()
+        rl = QVBoxLayout(right)
+        chart_btns = QHBoxLayout()
+        ov_btn = QPushButton("Overview (max latency vs deadline)")
+        ov_btn.clicked.connect(self._render_overview)
+        chart_btns.addWidget(ov_btn)
+        chart_btns.addStretch(1)
+        chart_btns.addWidget(QLabel("(select a row for its histogram)"))
+        rl.addLayout(chart_btns)
+        self.fig = Figure(figsize=(5, 4), layout="constrained")
+        self.canvas = FigureCanvasQTAgg(self.fig)
+        rl.addWidget(self.canvas, 1)
+        split.addWidget(right)
+        split.setSizes([600, 520])
+        outer.addWidget(split, 1)
+        return tab
+
+    # --- results helpers ---------------------------------------------------
+    @staticmethod
+    def _default_deadline_us(label: str) -> float:
+        """Heuristic default deadlines for the in-vehicle classes (µs); 0 = none."""
+        if "engineActuator" in label:   # CDT control traffic
+            return 100.0
+        if "rearDisplay" in label:       # Class B infotainment
+            return 50000.0
+        if "hud" in label or "obu" in label:  # Class A video/lidar
+            return 2000.0
+        return 0.0
+
+    def _refresh_result_scas(self) -> None:
+        self.result_combo.clear()
+        if not self.ini_path:
+            return
+        for p in find_result_scas(self.ini_path):
+            self.result_combo.addItem(p.name, userData=str(p))
+
+    def on_analyze(self) -> None:
+        if self.result_combo.count() == 0:
+            self._refresh_result_scas()
+        sca = self.result_combo.currentData()
+        if not sca:
+            self.result_summary.setText("No result file found — run a simulation first.")
+            return
+        self.result_summary.setText(f"Analyzing {Path(sca).name} … (reading via scave)")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.processEvents()
+        try:
+            res = analyze(self.env, sca)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._analysis = res
+        if not res.ok:
+            self.result_summary.setText(f"Analysis failed: {res.error}")
+            self.lat_table.setRowCount(0)
+            self.problems_box.clear()
+            self.fig.clear()
+            self.canvas.draw()
+            return
+        for s in res.streams:
+            d = self._default_deadline_us(s.label)
+            s.deadline_s = d * 1e-6 if d > 0 else None
+        self.result_summary.setText(
+            f"{Path(sca).name}: {len(res.streams)} streams · {res.total_drops} raw drops · "
+            f"sent {res.total_sent}/received {res.total_received} (received>sent ⇒ multicast)")
+        self._populate_latency_table()
+        self._render_overview()
+        self._update_problems()
+
+    def _populate_latency_table(self) -> None:
+        self._loading_lat = True
+        self.lat_table.setRowCount(0)
+        for s in self._analysis.streams:
+            r = self.lat_table.rowCount()
+            self.lat_table.insertRow(r)
+            vals = [s.label, str(s.count), f"{s.mean_us:.1f}", f"{s.max_us:.1f}",
+                    "" if s.deadline_s is None else f"{s.deadline_s * 1e6:.0f}"]
+            for c, v in enumerate(vals):
+                item = QTableWidgetItem(v)
+                if c != 4:  # only the deadline column is editable
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.lat_table.setItem(r, c, item)
+            self._set_status_cell(r, s)
+        self._loading_lat = False
+
+    def _set_status_cell(self, r: int, s) -> None:
+        item = QTableWidgetItem(s.status)
+        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        if s.status == "PASS":
+            item.setForeground(QColor("#176d2c"))
+            item.setBackground(QColor("#d8f5dd"))
+        elif s.status == "FAIL":
+            item.setForeground(QColor("#a11111"))
+            item.setBackground(QColor("#ffd9d9"))
+        self.lat_table.setItem(r, 5, item)
+
+    def _on_deadline_edited(self, item) -> None:
+        if getattr(self, "_loading_lat", True) or item.column() != 4 or not self._analysis:
+            return
+        r = item.row()
+        if r >= len(self._analysis.streams):
+            return
+        s = self._analysis.streams[r]
+        txt = item.text().strip()
+        if not txt:
+            s.deadline_s = None
+        else:
+            try:
+                s.deadline_s = float(txt) * 1e-6
+            except ValueError:
+                return
+        self._loading_lat = True
+        self._set_status_cell(r, s)
+        self._loading_lat = False
+        self._render_overview()
+        self._update_problems()
+
+    def _on_stream_selected(self) -> None:
+        if not getattr(self, "_analysis", None):
+            return
+        rows = {i.row() for i in self.lat_table.selectedIndexes()}
+        if len(rows) == 1:
+            r = next(iter(rows))
+            if r < len(self._analysis.streams):
+                self._render_histogram(self._analysis.streams[r])
+
+    def _render_overview(self) -> None:
+        if not getattr(self, "_analysis", None) or not self._analysis.streams:
+            return
+        streams = self._analysis.streams
+        self.fig.clear()
+        ax = self.fig.add_subplot(111)
+        y = list(range(len(streams)))
+        colors = ["#2bbf4e" if s.status == "PASS" else "#e23b3b" if s.status == "FAIL"
+                  else "#9aa0a6" for s in streams]
+        ax.barh(y, [s.max_us for s in streams], color=colors)
+        for i, s in enumerate(streams):
+            if s.deadline_s is not None:
+                ax.plot([s.deadline_s * 1e6], [i], marker="|", color="black", markersize=16)
+        ax.set_yticks(y)
+        ax.set_yticklabels([s.label for s in streams], fontsize=7)
+        ax.invert_yaxis()
+        ax.set_xlabel("max end-to-end latency (µs)")
+        ax.set_title("Per-stream max latency (| = deadline)")
+        self.canvas.draw()
+
+    def _render_histogram(self, s) -> None:
+        self.fig.clear()
+        ax = self.fig.add_subplot(111)
+        plotted = False
+        if s.binedges and s.binvalues and len(s.binedges) >= 2:
+            edges = [e * 1e6 for e in s.binedges]
+            vals = s.binvalues
+            try:
+                if len(edges) == len(vals) + 1 and all(e == e and abs(e) != float("inf") for e in edges):
+                    widths = [edges[i + 1] - edges[i] for i in range(len(vals))]
+                    ax.bar(edges[:-1], vals, width=widths, align="edge", color="#3b7dd8")
+                    plotted = True
+            except (TypeError, ValueError):
+                plotted = False
+            if not plotted:
+                ax.bar(range(len(vals)), vals, color="#3b7dd8")
+                plotted = True
+            ax.set_xlabel("packet lifetime (µs)")
+            ax.set_ylabel("count")
+        if not plotted:
+            ax.text(0.5, 0.5, "no histogram bins for this stream", ha="center", va="center")
+        if s.deadline_s is not None:
+            ax.axvline(s.deadline_s * 1e6, color="red", linestyle="--", label="deadline")
+            ax.legend()
+        ax.set_title(f"{s.label} — latency distribution (max {s.max_us:.1f} µs)")
+        self.canvas.draw()
+
+    def _update_problems(self) -> None:
+        if not getattr(self, "_analysis", None):
+            return
+        colors = {"error": "#a11111", "warning": "#b8860b", "info": "#176d2c"}
+        html = []
+        for p in detect_problems(self._analysis):
+            c = colors.get(p.severity, "#333")
+            block = (f"<p style='margin:3px 0'><b style='color:{c}'>{p.icon} {p.title}</b><br>"
+                     f"<span style='color:#444'>{p.detail}</span>")
+            if p.advice:
+                block += f"<br><i style='color:#666'>→ {p.advice}</i>"
+            html.append(block + "</p>")
+        self.problems_box.setHtml("".join(html))
+
     def _build_topology_tab(self) -> QWidget:
         tab = QWidget()
         lay = QHBoxLayout(tab)
@@ -429,6 +660,7 @@ class MainWindow(QMainWindow):
         self._loading = prev_loading
 
         self.refresh_results()
+        self._refresh_result_scas()
         self._load_topology(network)
         self._refresh_config()
         self.statusBar().showMessage(f"Loaded {self.ini_path.name}")
@@ -570,6 +802,7 @@ class MainWindow(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.statusBar().showMessage(f"Finished (exit {code}).")
         self.refresh_results()
+        self._refresh_result_scas()
 
     # --- helpers -----------------------------------------------------------
     def _parse_status(self, chunk: str) -> None:

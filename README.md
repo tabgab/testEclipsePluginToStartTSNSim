@@ -10,11 +10,13 @@ Tools* — no Eclipse plugin installation required.
 a chosen TSN showcase configuration (headless or Qtenv), optionally expose the
 built-in **MCP server**, and show the produced result files.
 
-**Step 2** (branch `feature/enhanced`): a **topology view** (the network diagram
-drawn from the NED, color-coded by role, links styled by bitrate), a **live run
-monitor** (progress, sim time, events, speed, memory), and a *ZeroConfigTSN*-style
-**configuration builder** (TSN feature toggles + per-traffic-class shaping +
-incompatibility warnings → generate a runnable config → run).
+**Step 2–3** (branch `feature/enhanced`): a **topology view** (network diagram
+from the NED), a **live run monitor**, a *ZeroConfigTSN*-style **configuration
+builder** (feature toggles + per-class shaping + incompatibility warnings →
+generate a runnable config → run), and a **results analyzer** — per-stream
+end-to-end latency with **PASS/FAIL vs editable deadlines**, a max-latency chart
+and per-stream latency histograms, and a **problems & advice** panel that flags
+deadline misses and congestion/routing drops (ignoring normal switching drops).
 
 > Base demo: INET's `showcases/tsn/combiningfeatures/invehicle` — a realistic
 > in-vehicle network (6 switches, ~19 end-stations, redundant links, 4 traffic
@@ -92,6 +94,16 @@ The GUI has two tabs:
   showcase is never modified) and executed.
 
   ![Config builder](docs/config-builder.png)
+- **Results** — pick a result `.sca` and **Analyze**. A table lists each stream's
+  end-to-end latency (count, mean, max) with an **editable deadline** column that
+  colours the row PASS/FAIL; a bar chart shows max latency per stream against
+  deadline markers, and selecting a row shows that stream's latency histogram. A
+  **Problems & advice** panel flags deadline misses and meaningful drops
+  (congestion / routing / interface-down) with concrete suggestions — while
+  ignoring normal switching drops. Try the in-vehicle `brokenComponent` fault
+  scenarios (none vs link/wheel/camera) to see failures appear.
+
+  ![Results](docs/results-tab.png)
 - **Topology** — the network diagram parsed from the NED `@display` positions,
   with the background image (e.g. the car) behind it. Switches/devices/clock are
   color-coded and links styled by bitrate. Click a node to see its role, port
@@ -118,10 +130,13 @@ The GUI has two tabs:
 | `tsntool/inifile.py` | parse `omnetpp.ini` for runnable `[Config …]` sections |
 | `tsntool/topology.py` | parse a NED network into nodes/links/positions for the diagram |
 | `tsntool/inifgen.py` | generate a runnable `[Config]` (extend a base + feature/shaper overrides) + compatibility checks |
+| `tsntool/analyzer.py` | read `.sca` via a scave subprocess; per-stream latency, drops, pass/fail |
+| `tsntool/_scave_helper.py` | subprocess worker that reads results via `omnetpp.scave` → JSON |
+| `tsntool/problems.py` | deadline-miss + meaningful-drop detection with advice |
 | `tsntool/runner.py` | launch sims via the `inet` wrapper (`-u Cmdenv -c …`), stream output |
 | `tsntool/mcp_client.py` | minimal MCP (Streamable HTTP) client for the built-in server |
 | `tsntool/cli.py` | `env` / `list` / `topology` / `run` / `mcp` / `gui` subcommands |
-| `tsntool/gui/app.py` | PySide6 window (Run & Monitor + Configure + Topology tabs) |
+| `tsntool/gui/app.py` | PySide6 window (Run & Monitor + Configure + Results + Topology tabs) |
 | `tsntool/gui/topology_view.py` | QGraphicsView topology diagram + PNG renderer |
 
 Simulations are launched through INET's `bin/inet` wrapper (which assembles the
@@ -141,8 +156,11 @@ pytest -q
 - **Step 2 (`feature/enhanced`):** topology view ✅ + live run monitor ✅ +
   *ZeroConfigTSN*-style config builder ✅ (feature toggles + per-class table +
   incompatibility warnings → generate `.ini` → run).
-- **Step 3 (next):** results tables, per-hop Gantt, histograms, problem
-  detection & advice (using the `brokenComponent` fault scenarios).
+- **Step 3 (`feature/enhanced`):** results analyzer ✅ — per-stream latency
+  PASS/FAIL vs editable deadlines, max-latency chart + histograms, and a
+  problems/advice panel (validated with the `brokenComponent` fault scenarios).
+- **Step 4 (next):** AI analysis over MCP (natural-language Q&A on results;
+  full MCP-driven runs).
 - **Step 3:** results tables, per-hop Gantt, histograms, problem detection &
   advice (uses the `brokenComponent` fault scenarios).
 - **Step 4:** AI analysis over the MCP server.
