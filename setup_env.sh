@@ -24,7 +24,7 @@ create_and_install() {
   # shellcheck disable=SC1091
   source "$VENV/bin/activate"
   python -m pip install -U pip wheel >/dev/null
-  python -m pip install -e ".[gui,analysis,dev]"
+  python -m pip install -e ".[gui,analysis,ai,dev]"
 }
 
 PY="$(pick_python)"

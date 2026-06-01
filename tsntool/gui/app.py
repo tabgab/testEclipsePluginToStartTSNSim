@@ -15,7 +15,7 @@ import re
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, Qt
+from PySide6.QtCore import QProcess, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QFont, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog,
@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
+from .. import ai
 from ..analyzer import AnalysisResult, analyze, find_result_scas
 from ..environment import OmnetppEnv
 from ..inifgen import (
@@ -47,6 +48,29 @@ _RE_SPEED = re.compile(r"ev/sec=([\d.eE+\-]+)\s+simsec/sec=([\d.eE+\-]+)")
 _RE_MSG = re.compile(r"present:\s*(\d+)\s+in FES:\s*(\d+)\s+Memory \(RSS\):\s*([\d.]+\s*\w+)")
 
 
+class AIChatWorker(QThread):
+    """Runs a streaming LLM chat off the GUI thread, emitting text chunks."""
+    chunk = Signal(str)
+    finished_ok = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, provider, system, history, parent=None):
+        super().__init__(parent)
+        self.provider = provider
+        self.system = system
+        self.history = history
+
+    def run(self) -> None:
+        try:
+            text = ai.stream_chat(self.provider, self.system, self.history,
+                                  lambda t: self.chunk.emit(t))
+            self.finished_ok.emit(text)
+        except ai.AIError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # never let the worker crash the app
+            self.failed.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self, env: OmnetppEnv, ini_path: Path | None):
         super().__init__()
@@ -56,6 +80,8 @@ class MainWindow(QMainWindow):
         self.ini_path: Path | None = None
         self.topo: Topology | None = None
         self._analysis: AnalysisResult | None = None
+        self._ai_history: list[dict] = []
+        self._ai_worker: AIChatWorker | None = None
         self._loading_lat = True
         self._loading_results = True   # suppress auto-analyze during list population
         self._last_run_config: str | None = None
@@ -93,6 +119,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_config_tab(), "Configure (ZeroConfigTSN)")
         self._results_tab = self._build_results_tab()
         self.tabs.addTab(self._results_tab, "Results")
+        self.tabs.addTab(self._build_ai_tab(), "AI Assistant")
         self.tabs.addTab(self._build_topology_tab(), "Topology")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self.tabs, 1)
@@ -612,6 +639,134 @@ class MainWindow(QMainWindow):
                 block += f"<br><i style='color:#666'>→ {p.advice}</i>"
             html.append(block + "</p>")
         self.problems_box.setHtml("".join(html))
+
+    def _build_ai_tab(self) -> QWidget:
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+
+        top = QHBoxLayout()
+        self._ai_provider = ai.detect_provider()
+        if self._ai_provider:
+            prov_text = f"LLM provider: {self._ai_provider.label} · model {self._ai_provider.model}"
+        else:
+            prov_text = ("No LLM provider detected — set ANTHROPIC_API_KEY for Claude, "
+                         "or run a local Ollama server.")
+        self.ai_provider_label = QLabel(prov_text)
+        self.ai_provider_label.setStyleSheet("color:#555;")
+        top.addWidget(self.ai_provider_label, 1)
+        redetect = QPushButton("Re-detect")
+        redetect.clicked.connect(self._ai_redetect)
+        top.addWidget(redetect)
+        lay.addLayout(top)
+
+        hint = QLabel("Ask about the loaded network, configurations, or the analyzed "
+                      "results. The assistant is grounded in the current Results tab data.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#888; font-size:11px;")
+        lay.addWidget(hint)
+
+        self.ai_view = QTextEdit(readOnly=True)
+        self.ai_view.setStyleSheet("font-size:13px;")
+        lay.addWidget(self.ai_view, 1)
+
+        row = QHBoxLayout()
+        self.ai_input = QLineEdit()
+        self.ai_input.setPlaceholderText("Ask a question, e.g. why does the CDT traffic miss its deadline?")
+        self.ai_input.returnPressed.connect(self.on_ai_ask)
+        self.ai_ask_btn = QPushButton("Ask")
+        self.ai_ask_btn.clicked.connect(self.on_ai_ask)
+        row.addWidget(self.ai_input, 1)
+        row.addWidget(self.ai_ask_btn)
+        lay.addLayout(row)
+
+        quick = QHBoxLayout()
+        diag = QPushButton("Diagnose current results")
+        diag.clicked.connect(lambda: self._ai_send(
+            "Diagnose the current results: which streams miss their deadlines, what is the "
+            "likely root cause, and what concrete changes would fix it?"))
+        explain = QPushButton("Explain this network")
+        explain.clicked.connect(lambda: self._ai_send(
+            "Describe this network's topology and traffic in plain language."))
+        clear = QPushButton("Clear chat")
+        clear.clicked.connect(self._ai_clear)
+        quick.addWidget(diag)
+        quick.addWidget(explain)
+        quick.addStretch(1)
+        quick.addWidget(clear)
+        lay.addLayout(quick)
+
+        if not self._ai_provider:
+            self.ai_ask_btn.setEnabled(False)
+        return tab
+
+    # --- AI helpers --------------------------------------------------------
+    def _ai_redetect(self) -> None:
+        self._ai_provider = ai.detect_provider()
+        if self._ai_provider:
+            self.ai_provider_label.setText(
+                f"LLM provider: {self._ai_provider.label} · model {self._ai_provider.model}")
+            self.ai_ask_btn.setEnabled(True)
+        else:
+            self.ai_provider_label.setText(
+                "No LLM provider detected — set ANTHROPIC_API_KEY for Claude, or run Ollama.")
+            self.ai_ask_btn.setEnabled(False)
+
+    def _ai_clear(self) -> None:
+        self._ai_history = []
+        self.ai_view.clear()
+
+    def _ai_context(self) -> str:
+        configs = parse_configs(self.ini_path) if self.ini_path and self.ini_path.is_file() else None
+        ctx = ai.build_context(
+            topology=self.topo, analysis=self._analysis, configs=configs,
+            ini_name=self.ini_path.name if self.ini_path else None)
+        return ai.SYSTEM_PREAMBLE + "\n\n# DATA\n" + ctx
+
+    def on_ai_ask(self) -> None:
+        text = self.ai_input.text().strip()
+        if text:
+            self.ai_input.clear()
+            self._ai_send(text)
+
+    def _ai_send(self, question: str) -> None:
+        if not self._ai_provider:
+            self._ai_append_html("<p style='color:#a11'>No LLM provider configured.</p>")
+            return
+        if self._ai_worker and self._ai_worker.isRunning():
+            return
+        self._ai_append_html(f"<p><b>You:</b> {question}</p><p><b>Assistant:</b> </p>")
+        self._ai_history.append({"role": "user", "content": question})
+        self.ai_ask_btn.setEnabled(False)
+        self.statusBar().showMessage("Asking the assistant…")
+        self._ai_worker = AIChatWorker(self._ai_provider, self._ai_context(),
+                                       list(self._ai_history), self)
+        self._ai_worker.chunk.connect(self._ai_on_chunk)
+        self._ai_worker.finished_ok.connect(self._ai_on_done)
+        self._ai_worker.failed.connect(self._ai_on_error)
+        self._ai_worker.start()
+
+    def _ai_on_chunk(self, text: str) -> None:
+        self.ai_view.moveCursor(QTextCursor.End)
+        self.ai_view.insertPlainText(text)
+        self.ai_view.moveCursor(QTextCursor.End)
+
+    def _ai_on_done(self, full_text: str) -> None:
+        self._ai_history.append({"role": "assistant", "content": full_text})
+        self.ai_view.append("")  # newline after the streamed answer
+        self.ai_ask_btn.setEnabled(True)
+        self.statusBar().showMessage("Ready.")
+
+    def _ai_on_error(self, message: str) -> None:
+        self._ai_append_html(f"<p style='color:#a11'>[error: {message}]</p>")
+        if self._ai_history and self._ai_history[-1]["role"] == "user":
+            self._ai_history.pop()  # drop the unanswered turn
+        self.ai_ask_btn.setEnabled(True)
+        self.statusBar().showMessage("AI error.")
+
+    def _ai_append_html(self, html: str) -> None:
+        self.ai_view.moveCursor(QTextCursor.End)
+        self.ai_view.insertHtml(html)
+        self.ai_view.moveCursor(QTextCursor.End)
 
     def _build_topology_tab(self) -> QWidget:
         tab = QWidget()

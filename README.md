@@ -10,13 +10,14 @@ Tools* — no Eclipse plugin installation required.
 a chosen TSN showcase configuration (headless or Qtenv), optionally expose the
 built-in **MCP server**, and show the produced result files.
 
-**Step 2–3** (branch `feature/enhanced`): a **topology view** (network diagram
+**Steps 2–4** (branch `feature/enhanced`): a **topology view** (network diagram
 from the NED), a **live run monitor**, a *ZeroConfigTSN*-style **configuration
 builder** (feature toggles + per-class shaping + incompatibility warnings →
-generate a runnable config → run), and a **results analyzer** — per-stream
+generate a runnable config → run), a **results analyzer** — per-stream
 end-to-end latency with **PASS/FAIL vs editable deadlines**, a max-latency chart
-and per-stream latency histograms, and a **problems & advice** panel that flags
-deadline misses and congestion/routing drops (ignoring normal switching drops).
+and per-stream latency histograms, and a **problems & advice** panel — and an
+**AI Assistant** for natural-language Q&A grounded in the analyzed results
+(Anthropic Claude, or a local Ollama with no API key).
 
 > Base demo: INET's `showcases/tsn/combiningfeatures/invehicle` — a realistic
 > in-vehicle network (6 switches, ~19 end-stations, redundant links, 4 traffic
@@ -104,6 +105,17 @@ The GUI has two tabs:
   scenarios (none vs link/wheel/camera) to see failures appear.
 
   ![Results](docs/results-tab.png)
+- **AI Assistant** — ask questions in natural language about the network,
+  configurations, and analyzed results. The assistant is **grounded** in the
+  current Results data (topology, per-stream latency + deadlines, detected
+  problems) and answers with concrete TSN fixes — always framed as
+  *simulation-observed*, never as provable bounds. Quick buttons: *Diagnose
+  current results*, *Explain this network*. Provider is auto-detected: **Anthropic
+  Claude** when `ANTHROPIC_API_KEY` is set (uses the `anthropic` SDK,
+  `claude-opus-4-8`, adaptive thinking, streaming, prompt caching), otherwise a
+  **local Ollama** server (no key, no cost). Replies stream on a background thread.
+
+  ![AI Assistant](docs/ai-assistant.png)
 - **Topology** — the network diagram parsed from the NED `@display` positions,
   with the background image (e.g. the car) behind it. Switches/devices/clock are
   color-coded and links styled by bitrate. Click a node to see its role, port
@@ -133,10 +145,11 @@ The GUI has two tabs:
 | `tsntool/analyzer.py` | read `.sca` via a scave subprocess; per-stream latency, drops, pass/fail |
 | `tsntool/_scave_helper.py` | subprocess worker that reads results via `omnetpp.scave` → JSON |
 | `tsntool/problems.py` | deadline-miss + meaningful-drop detection with advice |
+| `tsntool/ai.py` | grounding-context builder + Anthropic/Ollama chat providers (streaming) |
 | `tsntool/runner.py` | launch sims via the `inet` wrapper (`-u Cmdenv -c …`), stream output |
 | `tsntool/mcp_client.py` | minimal MCP (Streamable HTTP) client for the built-in server |
 | `tsntool/cli.py` | `env` / `list` / `topology` / `run` / `mcp` / `gui` subcommands |
-| `tsntool/gui/app.py` | PySide6 window (Run & Monitor + Configure + Results + Topology tabs) |
+| `tsntool/gui/app.py` | PySide6 window (Run & Monitor + Configure + Results + AI Assistant + Topology) |
 | `tsntool/gui/topology_view.py` | QGraphicsView topology diagram + PNG renderer |
 
 Simulations are launched through INET's `bin/inet` wrapper (which assembles the
@@ -159,8 +172,9 @@ pytest -q
 - **Step 3 (`feature/enhanced`):** results analyzer ✅ — per-stream latency
   PASS/FAIL vs editable deadlines, max-latency chart + histograms, and a
   problems/advice panel (validated with the `brokenComponent` fault scenarios).
-- **Step 4 (next):** AI analysis over MCP (natural-language Q&A on results;
-  full MCP-driven runs).
+- **Step 4 (`feature/enhanced`):** AI Assistant ✅ — grounded natural-language
+  Q&A on the analyzed results (Anthropic Claude or local Ollama).
+  *Future:* full MCP-driven runs (drive a live sim via the MCP server).
 - **Step 3:** results tables, per-hop Gantt, histograms, problem detection &
   advice (uses the `brokenComponent` fault scenarios).
 - **Step 4:** AI analysis over the MCP server.
