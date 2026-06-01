@@ -704,7 +704,8 @@ class MainWindow(QMainWindow):
     def _update_ai_provider_label(self) -> None:
         p = self._ai_provider
         if p:
-            extra = f" · key: {self._settings.key_location()}" if p.name == "anthropic" else ""
+            extra = (f" · key: {self._settings.key_location(p.name)}"
+                     if p.name in ("anthropic", "openrouter") else "")
             self.ai_provider_label.setText(f"LLM provider: {p.label} · model {p.model}{extra}")
         else:
             self.ai_provider_label.setText(

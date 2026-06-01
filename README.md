@@ -115,13 +115,16 @@ The GUI has two tabs:
   ![AI Assistant](docs/ai-assistant.png)
 
   **Provider/model/key are explicit** via the **Settings…** dialog: choose
-  *Auto-detect / Anthropic (Claude) / Ollama (local)*, set the model, paste an
-  Anthropic API key (stored in the **OS keychain**, falling back to a `0600`
-  config file), or point at an Ollama URL and list its installed models — with a
-  **Test connection** button. Settings persist in `~/.config/tsntool/`.
-  Resolution order: explicit provider → `ANTHROPIC_API_KEY`/key present → reachable
-  Ollama. The Anthropic path uses the official `anthropic` SDK (`claude-opus-4-8`,
-  adaptive thinking, streaming, prompt caching); Ollama needs no key or cost.
+  *Auto-detect / Anthropic (Claude) / OpenRouter / Ollama (local)*, set the model,
+  paste the per-provider API key (stored in the **OS keychain**, falling back to a
+  `0600` config file), or point at an Ollama URL and list its installed models —
+  with a **Test connection** button. Settings persist in `~/.config/tsntool/`.
+  Resolution order: explicit provider → Anthropic key (`ANTHROPIC_API_KEY` or
+  stored) → OpenRouter key (`OPENROUTER_API_KEY` or stored) → reachable Ollama.
+  Anthropic uses the official `anthropic` SDK (`claude-opus-4-8`, adaptive
+  thinking, streaming, prompt caching); **OpenRouter** uses its OpenAI-compatible
+  streaming endpoint (any OpenRouter model id, e.g. `openai/gpt-4o`,
+  `anthropic/claude-opus-4.6`); Ollama needs no key or cost.
 
   ![AI settings](docs/ai-settings.png)
 - **Topology** — the network diagram parsed from the NED `@display` positions,

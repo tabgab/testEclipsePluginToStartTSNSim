@@ -43,7 +43,8 @@ def test_detect_anthropic_via_key(monkeypatch):
 def test_detect_none_when_nothing_available(monkeypatch):
     monkeypatch.delenv("LLM_PROVIDER", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setattr(ai, "_ollama_reachable", lambda timeout=1.5: False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(ai, "_ollama_reachable", lambda *a, **k: False)
     assert ai.detect_provider() is None
 
 

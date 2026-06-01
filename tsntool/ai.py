@@ -32,7 +32,9 @@ from .topology import Topology
 
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"
 DEFAULT_OLLAMA_MODEL = "llama3.1:latest"
+DEFAULT_OPENROUTER_MODEL = "anthropic/claude-opus-4.6"
 OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OPENROUTER_BASE = os.environ.get("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1")
 
 SYSTEM_PREAMBLE = (
     "You are a Time-Sensitive Networking (TSN) analyst embedded in a tool that "
@@ -145,14 +147,21 @@ def resolve_provider(settings=None) -> ProviderInfo | None:
     def s(attr):
         return getattr(settings, attr, "") if settings else ""
 
-    stored_key = settings.get_api_key() if settings else ""
-    env_key = os.environ.get("ANTHROPIC_API_KEY")
+    stored_anthropic = settings.get_api_key("anthropic") if settings else ""
+    stored_or = settings.get_api_key("openrouter") if settings else ""
+    env_anthropic = os.environ.get("ANTHROPIC_API_KEY")
+    env_or = os.environ.get("OPENROUTER_API_KEY")
     env_provider = os.environ.get("LLM_PROVIDER", "").lower().strip()
     provider = s("provider") or "auto"
 
     def anthropic(label):
         model = s("anthropic_model") or os.environ.get("ANTHROPIC_MODEL", DEFAULT_ANTHROPIC_MODEL)
-        return ProviderInfo("anthropic", model, label, api_key=(stored_key or None))
+        return ProviderInfo("anthropic", model, label, api_key=(stored_anthropic or None))
+
+    def openrouter(label):
+        model = s("openrouter_model") or os.environ.get("OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL)
+        return ProviderInfo("openrouter", model, label,
+                            api_key=(stored_or or env_or or None), base_url=OPENROUTER_BASE)
 
     def ollama(label):
         base = s("ollama_base_url") or OLLAMA_BASE
@@ -161,12 +170,16 @@ def resolve_provider(settings=None) -> ProviderInfo | None:
 
     if provider == "anthropic":
         return anthropic("Anthropic (Claude)")
+    if provider == "openrouter":
+        return openrouter("OpenRouter")
     if provider == "ollama":
         return ollama("Ollama (local)")
 
-    # auto
-    if stored_key or env_key or env_provider == "anthropic":
+    # auto: anthropic key → openrouter key → reachable ollama
+    if stored_anthropic or env_anthropic or env_provider == "anthropic":
         return anthropic("Anthropic (Claude, auto)")
+    if stored_or or env_or or env_provider == "openrouter":
+        return openrouter("OpenRouter (auto)")
     base = s("ollama_base_url") or OLLAMA_BASE
     if env_provider == "ollama" or _ollama_reachable(base):
         return ollama("Ollama (local, auto)")
@@ -192,11 +205,29 @@ def test_anthropic(model: str, api_key: str | None = None) -> tuple[bool, str]:
         return False, str(getattr(exc, "message", exc))[:200]
 
 
+def test_openrouter(model: str, api_key: str | None = None) -> tuple[bool, str]:
+    """Validate an OpenRouter key via GET /key (no tokens spent)."""
+    if not api_key:
+        return False, "no OpenRouter API key set"
+    req = urllib.request.Request(f"{OPENROUTER_BASE}/key",
+                                 headers={"Authorization": f"Bearer {api_key}"})
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            json.loads(r.read().decode("utf-8"))
+        return True, "key valid"
+    except urllib.error.HTTPError as exc:
+        return False, f"HTTP {exc.code} (check the key)"
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return False, str(exc)[:160]
+
+
 def stream_chat(provider: ProviderInfo, system: str,
                 history: list[dict], on_text: Callable[[str], None]) -> str:
     """Stream an assistant reply; calls on_text(chunk) and returns the full text."""
     if provider.name == "anthropic":
         return _stream_anthropic(provider.model, system, history, on_text, provider.api_key)
+    if provider.name == "openrouter":
+        return _stream_openrouter(provider.model, system, history, on_text, provider.api_key)
     if provider.name == "ollama":
         return _stream_ollama(provider.model, system, history, on_text, provider.base_url)
     raise AIError(f"unknown provider: {provider.name}")
@@ -255,4 +286,49 @@ def _stream_ollama(model, system, history, on_text, base_url=None) -> str:
                     break
     except urllib.error.URLError as exc:
         raise AIError(f"cannot reach Ollama at {base}: {exc}")
+    return "".join(collected)
+
+
+def _stream_openrouter(model, system, history, on_text, api_key=None) -> str:
+    """Stream from OpenRouter's OpenAI-compatible /chat/completions (SSE)."""
+    if not api_key:
+        raise AIError("no OpenRouter API key set (Settings… → OpenRouter, "
+                      "or the OPENROUTER_API_KEY env var)")
+    messages = [{"role": "system", "content": system}] + history
+    payload = json.dumps({"model": model, "messages": messages, "stream": True}).encode()
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "text/event-stream",
+        "X-Title": "tsntool",
+    }
+    req = urllib.request.Request(f"{OPENROUTER_BASE}/chat/completions",
+                                 data=payload, headers=headers, method="POST")
+    collected: list[str] = []
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            for raw in resp:
+                line = raw.decode("utf-8").strip()
+                if not line or line.startswith(":") or not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(data)
+                except ValueError:
+                    continue
+                if obj.get("error"):
+                    raise AIError(f"OpenRouter error: {obj['error']}")
+                choices = obj.get("choices") or []
+                if choices:
+                    chunk = (choices[0].get("delta") or {}).get("content") or ""
+                    if chunk:
+                        collected.append(chunk)
+                        on_text(chunk)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")[:300] if exc.fp else ""
+        raise AIError(f"OpenRouter HTTP {exc.code}: {body}")
+    except urllib.error.URLError as exc:
+        raise AIError(f"cannot reach OpenRouter: {exc}")
     return "".join(collected)

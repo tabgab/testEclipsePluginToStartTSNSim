@@ -1,7 +1,7 @@
-"""Persisted tool settings — currently the AI/LLM provider configuration.
+"""Persisted tool settings — the AI/LLM provider configuration.
 
 Non-secret settings (provider choice, model names, Ollama URL) live in a JSON
-file under the config directory. The Anthropic API key is stored separately and
+file under the config directory. Each provider's API key is stored separately and
 securely in the OS keychain via :mod:`keyring` when available, falling back to a
 ``0600`` file if the keychain can't be used. Nothing secret goes in the JSON.
 
@@ -17,7 +17,12 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 KEYRING_SERVICE = "tsntool"
-KEY_ACCOUNT = "anthropic_api_key"
+
+# provider -> (keychain account, key-file name, env var)
+_KEY_INFO = {
+    "anthropic": ("anthropic_api_key", "anthropic.key", "ANTHROPIC_API_KEY"),
+    "openrouter": ("openrouter_api_key", "openrouter.key", "OPENROUTER_API_KEY"),
+}
 
 
 def config_dir() -> Path:
@@ -29,16 +34,13 @@ def _settings_path() -> Path:
     return config_dir() / "settings.json"
 
 
-def _keyfile_path() -> Path:
-    return config_dir() / "anthropic.key"
-
-
 @dataclass
 class Settings:
-    provider: str = "auto"        # "auto" | "anthropic" | "ollama"
-    anthropic_model: str = ""     # blank → default / env
-    ollama_model: str = ""        # blank → default / env
-    ollama_base_url: str = ""     # blank → default / env
+    provider: str = "auto"        # "auto" | "anthropic" | "openrouter" | "ollama"
+    anthropic_model: str = ""
+    openrouter_model: str = ""
+    ollama_model: str = ""
+    ollama_base_url: str = ""
 
     # --- persistence (non-secret) -----------------------------------------
     @classmethod
@@ -63,56 +65,61 @@ class Settings:
         except OSError:
             pass
 
-    # --- API key (keychain preferred, 0600 file fallback) -----------------
-    def get_api_key(self) -> str:
-        """Return the stored Anthropic key (keychain first, then file)."""
+    # --- per-provider API keys (keychain preferred, 0600 file fallback) ---
+    def get_api_key(self, provider: str = "anthropic") -> str:
+        account = _KEY_INFO[provider][0]
         try:
             import keyring
-            val = keyring.get_password(KEYRING_SERVICE, KEY_ACCOUNT)
+            val = keyring.get_password(KEYRING_SERVICE, account)
             if val:
                 return val
         except Exception:
             pass
-        return self._file_key()
+        return self._file_key(provider)
 
-    def set_api_key(self, key: str) -> str:
+    def set_api_key(self, key: str, provider: str = "anthropic") -> str:
         """Store the key. Returns where it went: 'keychain' | 'file' | 'cleared'."""
         key = (key or "").strip()
         if not key:
-            self._clear_key()
+            self._clear_key(provider)
             return "cleared"
+        account = _KEY_INFO[provider][0]
         try:
             import keyring
-            keyring.set_password(KEYRING_SERVICE, KEY_ACCOUNT, key)
-            self._write_file_key("")     # don't leave a stale plaintext copy
+            keyring.set_password(KEYRING_SERVICE, account, key)
+            self._write_file_key("", provider)   # no stale plaintext copy
             return "keychain"
         except Exception:
-            self._write_file_key(key)
+            self._write_file_key(key, provider)
             return "file"
 
-    def key_location(self) -> str:
+    def key_location(self, provider: str = "anthropic") -> str:
+        account, _file, env = _KEY_INFO[provider]
         try:
             import keyring
-            if keyring.get_password(KEYRING_SERVICE, KEY_ACCOUNT):
+            if keyring.get_password(KEYRING_SERVICE, account):
                 return "OS keychain"
         except Exception:
             pass
-        if self._file_key():
+        if self._file_key(provider):
             return "config file (plaintext, 0600)"
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            return "ANTHROPIC_API_KEY env var"
+        if os.environ.get(env):
+            return f"{env} env var"
         return "not set"
 
     # --- file-fallback helpers --------------------------------------------
-    def _file_key(self) -> str:
-        f = _keyfile_path()
+    def _keyfile_path(self, provider: str) -> Path:
+        return config_dir() / _KEY_INFO[provider][1]
+
+    def _file_key(self, provider: str) -> str:
+        f = self._keyfile_path(provider)
         try:
             return f.read_text(encoding="utf-8").strip() if f.is_file() else ""
         except OSError:
             return ""
 
-    def _write_file_key(self, key: str) -> None:
-        f = _keyfile_path()
+    def _write_file_key(self, key: str, provider: str) -> None:
+        f = self._keyfile_path(provider)
         if not key:
             if f.is_file():
                 try:
@@ -127,10 +134,10 @@ class Settings:
         except OSError:
             pass
 
-    def _clear_key(self) -> None:
-        self._write_file_key("")
+    def _clear_key(self, provider: str) -> None:
+        self._write_file_key("", provider)
         try:
             import keyring
-            keyring.delete_password(KEYRING_SERVICE, KEY_ACCOUNT)
+            keyring.delete_password(KEYRING_SERVICE, _KEY_INFO[provider][0])
         except Exception:
             pass

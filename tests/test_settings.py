@@ -28,7 +28,8 @@ def test_settings_roundtrip(tmp_path, monkeypatch):
     # settings.json holds only non-secret fields (no api key field)
     import json
     data = json.loads((tmp_path / "settings.json").read_text())
-    assert set(data) == {"provider", "anthropic_model", "ollama_model", "ollama_base_url"}
+    assert set(data) == {"provider", "anthropic_model", "openrouter_model",
+                         "ollama_model", "ollama_base_url"}
 
 
 def test_api_key_file_fallback(tmp_path, monkeypatch):
@@ -60,3 +61,25 @@ def test_resolve_explicit_anthropic_uses_stored_key(tmp_path, monkeypatch):
     s = Settings(provider="anthropic", anthropic_model="claude-opus-4-8")
     p = ai.resolve_provider(s)
     assert p.name == "anthropic" and p.model == "claude-opus-4-8" and p.api_key == "sk-stored"
+
+
+def test_resolve_explicit_openrouter(tmp_path, monkeypatch):
+    monkeypatch.setenv("TSNTOOL_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    # keychain returns a key only for the openrouter account
+    monkeypatch.setattr(keyring, "get_password",
+                        lambda svc, acct: "sk-or-x" if acct == "openrouter_api_key" else None)
+    s = Settings(provider="openrouter", openrouter_model="openai/gpt-4o")
+    p = ai.resolve_provider(s)
+    assert p.name == "openrouter" and p.model == "openai/gpt-4o" and p.api_key == "sk-or-x"
+    assert p.base_url and "openrouter" in p.base_url
+
+
+def test_resolve_auto_prefers_openrouter_over_ollama(tmp_path, monkeypatch):
+    monkeypatch.setenv("TSNTOOL_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-env")
+    monkeypatch.setattr(keyring, "get_password", lambda *a, **k: None)
+    p = ai.resolve_provider(Settings(provider="auto"))
+    assert p.name == "openrouter"

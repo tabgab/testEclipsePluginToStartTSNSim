@@ -14,16 +14,34 @@ from ..settings import Settings
 
 _PROVIDERS = [("Auto-detect", "auto"),
               ("Anthropic (Claude)", "anthropic"),
+              ("OpenRouter", "openrouter"),
               ("Ollama (local)", "ollama")]
+
+
+def _key_field(value: str, placeholder: str) -> tuple[QWidget, QLineEdit]:
+    """A masked key line-edit with a Show toggle; returns (row widget, line edit)."""
+    edit = QLineEdit(value)
+    edit.setEchoMode(QLineEdit.Password)
+    edit.setPlaceholderText(placeholder)
+    show = QCheckBox("Show")
+    show.toggled.connect(lambda on: edit.setEchoMode(
+        QLineEdit.Normal if on else QLineEdit.Password))
+    row = QHBoxLayout()
+    row.addWidget(edit, 1)
+    row.addWidget(show)
+    w = QWidget()
+    w.setLayout(row)
+    return w, edit
 
 
 class SettingsDialog(QDialog):
     def __init__(self, settings: Settings, parent=None):
         super().__init__(parent)
         self.settings = settings
-        self._loaded_key = settings.get_api_key()
+        self._loaded_anthropic = settings.get_api_key("anthropic")
+        self._loaded_or = settings.get_api_key("openrouter")
         self.setWindowTitle("AI settings")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(540)
         lay = QVBoxLayout(self)
 
         form = QFormLayout()
@@ -41,22 +59,28 @@ class SettingsDialog(QDialog):
         self.anthropic_model = QLineEdit(settings.anthropic_model)
         self.anthropic_model.setPlaceholderText(ai.DEFAULT_ANTHROPIC_MODEL)
         af.addRow("Model:", self.anthropic_model)
-        keyrow = QHBoxLayout()
-        self.api_key = QLineEdit(self._loaded_key)
-        self.api_key.setEchoMode(QLineEdit.Password)
-        self.api_key.setPlaceholderText("sk-ant-…  (blank → use ANTHROPIC_API_KEY env var)")
-        show = QCheckBox("Show")
-        show.toggled.connect(lambda on: self.api_key.setEchoMode(
-            QLineEdit.Normal if on else QLineEdit.Password))
-        keyrow.addWidget(self.api_key, 1)
-        keyrow.addWidget(show)
-        kw = QWidget()
-        kw.setLayout(keyrow)
+        kw, self.anthropic_key = _key_field(
+            self._loaded_anthropic, "sk-ant-…  (blank → ANTHROPIC_API_KEY env var)")
         af.addRow("API key:", kw)
-        self.key_loc = QLabel(f"stored in: {settings.key_location()}")
-        self.key_loc.setStyleSheet("color:#888; font-size:11px;")
-        af.addRow("", self.key_loc)
+        self.anthropic_loc = QLabel(f"stored in: {settings.key_location('anthropic')}")
+        self.anthropic_loc.setStyleSheet("color:#888; font-size:11px;")
+        af.addRow("", self.anthropic_loc)
         lay.addWidget(self.agrp)
+
+        # --- OpenRouter ---
+        self.orgrp = QGroupBox("OpenRouter")
+        orf = QFormLayout(self.orgrp)
+        self.or_model = QLineEdit(settings.openrouter_model)
+        self.or_model.setPlaceholderText(ai.DEFAULT_OPENROUTER_MODEL
+                                         + "  (any OpenRouter model id, e.g. openai/gpt-4o)")
+        orf.addRow("Model:", self.or_model)
+        kw2, self.or_key = _key_field(
+            self._loaded_or, "sk-or-…  (blank → OPENROUTER_API_KEY env var)")
+        orf.addRow("API key:", kw2)
+        self.or_loc = QLabel(f"stored in: {settings.key_location('openrouter')}")
+        self.or_loc.setStyleSheet("color:#888; font-size:11px;")
+        orf.addRow("", self.or_loc)
+        lay.addWidget(self.orgrp)
 
         # --- Ollama ---
         self.ogrp = QGroupBox("Ollama (local)")
@@ -100,6 +124,7 @@ class SettingsDialog(QDialog):
     def _sync_enabled(self) -> None:
         p = self._provider()
         self.agrp.setEnabled(p in ("auto", "anthropic"))
+        self.orgrp.setEnabled(p in ("auto", "openrouter"))
         self.ogrp.setEnabled(p in ("auto", "ollama"))
 
     def _list_ollama(self) -> None:
@@ -110,16 +135,24 @@ class SettingsDialog(QDialog):
 
     def _test(self) -> None:
         p = self._provider()
-        field_key = self.api_key.text().strip()
+        a_key = self.anthropic_key.text().strip()
+        or_key = self.or_key.text().strip()
         self.test_lbl.setText("testing…")
         self.test_lbl.setStyleSheet("color:#888;")
         QApplication.processEvents()
+
         use_anthropic = p == "anthropic" or (
-            p == "auto" and (field_key or os.environ.get("ANTHROPIC_API_KEY")))
+            p == "auto" and (a_key or os.environ.get("ANTHROPIC_API_KEY")))
+        use_or = (not use_anthropic) and (p == "openrouter" or (
+            p == "auto" and (or_key or os.environ.get("OPENROUTER_API_KEY"))))
+
         if use_anthropic:
             ok, msg = ai.test_anthropic(
-                self.anthropic_model.text().strip() or ai.DEFAULT_ANTHROPIC_MODEL,
-                field_key or None)
+                self.anthropic_model.text().strip() or ai.DEFAULT_ANTHROPIC_MODEL, a_key or None)
+        elif use_or:
+            ok, msg = ai.test_openrouter(
+                self.or_model.text().strip() or ai.DEFAULT_OPENROUTER_MODEL,
+                or_key or os.environ.get("OPENROUTER_API_KEY"))
         else:
             base = self.ollama_url.text().strip() or ai.OLLAMA_BASE
             models = ai.list_ollama_models(base)
@@ -132,9 +165,12 @@ class SettingsDialog(QDialog):
     def _on_save(self) -> None:
         self.settings.provider = self._provider()
         self.settings.anthropic_model = self.anthropic_model.text().strip()
+        self.settings.openrouter_model = self.or_model.text().strip()
         self.settings.ollama_model = self.ollama_model.text().strip()
         self.settings.ollama_base_url = self.ollama_url.text().strip()
-        if self.api_key.text().strip() != (self._loaded_key or ""):
-            self.settings.set_api_key(self.api_key.text())
+        if self.anthropic_key.text().strip() != (self._loaded_anthropic or ""):
+            self.settings.set_api_key(self.anthropic_key.text(), "anthropic")
+        if self.or_key.text().strip() != (self._loaded_or or ""):
+            self.settings.set_api_key(self.or_key.text(), "openrouter")
         self.settings.save()
         self.accept()
