@@ -1,8 +1,7 @@
 # TSN Tool for OMNeT++ / INET
 
 A tool to **configure, run and analyze Time-Sensitive Networking (TSN)
-simulations** on OMNeT++ 6.4 + INET 4.6, recreating (and improving on) the
-RTaW-Pegase *ZeroConfigTSN* workflow. It is a standalone Python + Qt
+simulations** on OMNeT++ 6.4 + INET 4.6. It is a standalone Python + Qt
 application that you can launch from inside the OMNeT++ IDE via *External
 Tools* — no Eclipse plugin installation required.
 
